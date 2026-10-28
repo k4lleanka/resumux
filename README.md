@@ -278,13 +278,22 @@ eight characters of the session id. Secrets are never logged.
 | | WebSocket / CDN | Open connections survive a reconnect | Several paths per connection |
 |---|---|---|---|
 | resumux | yes | yes | yes (failover) |
+| [kptunnel](https://github.com/ifritJP/kptunnel) | WebSocket; CDN not documented | yes, per its README | not documented |
 | [chisel](https://github.com/jpillora/chisel) | yes | no | no |
 | [wstunnel](https://github.com/erebe/wstunnel) | yes | no | no |
+| [Cloudflare Tunnel with Access](https://developers.cloudflare.com/cloudflare-one/) | Cloudflare only | not documented | no |
 | [Eternal Terminal](https://eternalterminal.dev) | no | yes, for terminal sessions | no |
 
 Based on each project's documentation in October 2026. chisel and wstunnel
 reconnect the WebSocket, but neither documents keeping connections that were
-open when it dropped.
+open when it dropped. kptunnel does, though it does not say how.
+
+Cloudflare's own way to reach TCP services through its network needs
+cloudflared or the Cloudflare One client on each user's machine and a login
+through Cloudflare Access; its free plan covers 50 users. That suits a team.
+resumux is meant for services many people reach, such as a public server
+shipped with its own client, and for connections that must outlive the
+network underneath them.
 
 ## Development
 
