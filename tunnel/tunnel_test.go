@@ -92,7 +92,7 @@ type harness struct {
 	blocked atomic.Bool
 }
 
-func startServer(t testing.TB, cfg ServerConfig, tweaks ...func(*Server)) *harness {
+func startServer(t testing.TB, cfg ServerConfig) *harness {
 	t.Helper()
 	if cfg.Token == "" {
 		cfg.Token = testToken
@@ -104,9 +104,6 @@ func startServer(t testing.TB, cfg ServerConfig, tweaks ...func(*Server)) *harne
 	sv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, tweak := range tweaks {
-		tweak(sv)
 	}
 	h := &harness{server: sv}
 	hs := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -627,86 +624,5 @@ func TestResumeFinishedSession(t *testing.T) {
 	}
 	if got := resumeStatus(strings.Repeat("0", 64)); got != http.StatusNotFound {
 		t.Errorf("wrong secret: got %d, want 404", got)
-	}
-}
-
-// dialRaw opens a path the way a client would, but sends nothing on it.
-func dialRaw(t *testing.T, url string, auth *sessionAuth) (*websocket.Conn, *sessionAuth) {
-	t.Helper()
-	hdr := http.Header{}
-	hdr.Set("Authorization", "Bearer "+testToken)
-	hdr.Set(headerVersion, protocolVersion)
-	if auth != nil {
-		hdr.Set(headerSession, auth.id)
-		hdr.Set(headerSecret, auth.secret)
-	}
-	c, resp, err := websocket.DefaultDialer.Dial(url, hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c, &sessionAuth{id: resp.Header.Get(headerSession), secret: resp.Header.Get(headerSecret)}
-}
-
-func shortOrphanGrace(sv *Server) { sv.orphanGrace = 200 * time.Millisecond }
-
-// TestOrphanedSessionIsDroppedEarly covers a handshake response that never
-// reached the client: the server must not hold the target connection for the
-// whole resume timeout.
-func TestOrphanedSessionIsDroppedEarly(t *testing.T) {
-	closed := make(chan struct{})
-	target := listenTarget(t, func(c *net.TCPConn) {
-		io.Copy(io.Discard, c)
-		close(closed)
-	})
-	h := startServer(t, ServerConfig{Target: target, ResumeTimeout: time.Minute}, shortOrphanGrace)
-
-	c, _ := dialRaw(t, h.url, nil)
-	c.Close()
-
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("target connection still open after the client vanished")
-	}
-	deadline := time.Now().Add(time.Second)
-	for h.server.NumSessions() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("orphaned session still registered")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestHeardSessionIsNotOrphaned checks that a session the client has shown it
-// holds keeps waiting for the full resume timeout.
-func TestHeardSessionIsNotOrphaned(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		join func(t *testing.T, h *harness, c *websocket.Conn, auth *sessionAuth)
-	}{
-		{"frame on first path", func(t *testing.T, _ *harness, c *websocket.Conn, _ *sessionAuth) {
-			ack := make([]byte, 9)
-			ack[0] = 0x03
-			if err := c.WriteMessage(websocket.BinaryMessage, ack); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"resumed path", func(t *testing.T, h *harness, _ *websocket.Conn, auth *sessionAuth) {
-			c2, _ := dialRaw(t, h.url, auth)
-			c2.Close()
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := startServer(t, ServerConfig{ResumeTimeout: time.Minute}, shortOrphanGrace)
-			c, auth := dialRaw(t, h.url, nil)
-			tc.join(t, h, c, auth)
-			time.Sleep(100 * time.Millisecond)
-			c.Close()
-
-			time.Sleep(time.Second)
-			if n := h.server.NumSessions(); n != 1 {
-				t.Fatalf("got %d sessions, want 1", n)
-			}
-		})
 	}
 }

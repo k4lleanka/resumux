@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -66,31 +65,9 @@ func (c ServerConfig) withDefaults() ServerConfig {
 type serverSession struct {
 	secret string
 	s      *session.Session
-	// heard is set once the client has shown it holds the session: a frame
-	// on the first path, or a resumed path.
-	heard atomic.Bool
 	// joining counts paths being upgraded. Guarded by Server.mu.
 	joining int
 }
-
-// firstPath marks its session heard when the first frame arrives on it.
-type firstPath struct {
-	*wspath.Path
-	ss *serverSession
-}
-
-func (p firstPath) ReadFrame() ([]byte, error) {
-	b, err := p.Path.ReadFrame()
-	if err == nil {
-		p.ss.heard.Store(true)
-	}
-	return b, err
-}
-
-// defaultOrphanGrace is how long a session whose client was never heard from
-// waits for a path after its first one dies. A client that got the handshake
-// response dials again at once; one that did not never will.
-const defaultOrphanGrace = 10 * time.Second
 
 // Server accepts WebSocket paths and forwards each session to the target.
 type Server struct {
@@ -103,17 +80,11 @@ type Server struct {
 	// delivered, so a client resuming one learns it is done, not lost.
 	finished map[string]string
 	closed   bool
-
-	orphanGrace time.Duration // see defaultOrphanGrace
 }
 
 // ErrSessionExpired is the reason a session closes after ResumeTimeout
 // without a path.
 var ErrSessionExpired = errors.New("tunnel: no path within resume timeout")
-
-// errNeverJoined is the reason a session closes when its first path died
-// before the client could have learned the session id.
-var errNeverJoined = errors.New("tunnel: client never joined the session")
 
 // ErrServerClosed is the reason sessions end when the server is closed.
 var ErrServerClosed = errors.New("tunnel: server closed")
@@ -133,9 +104,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			// Clients are not browsers; the token is what authenticates them.
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
-		sessions:    make(map[string]*serverSession),
-		finished:    make(map[string]string),
-		orphanGrace: min(defaultOrphanGrace, cfg.ResumeTimeout),
+		sessions: make(map[string]*serverSession),
+		finished: make(map[string]string),
 	}, nil
 }
 
@@ -206,7 +176,6 @@ func (sv *Server) resume(w http.ResponseWriter, r *http.Request, id string) {
 	if err != nil {
 		return
 	}
-	ss.heard.Store(true)
 	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], r.RemoteAddr, ss.s.NumPaths())
 }
 
@@ -243,7 +212,7 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	if sv.closed || len(sv.sessions) >= sv.cfg.MaxSessions {
 		sv.mu.Unlock()
 		target.Close()
-		http.Error(w, "too many sessions", http.StatusServiceUnavailable)
+		http.Error(w, "server busy or closing", http.StatusServiceUnavailable)
 		return
 	}
 	sv.sessions[id] = ss
@@ -262,12 +231,10 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	first := wspath.New(c, sv.cfg.Path)
-	s.AddPath(firstPath{Path: first, ss: ss})
+	s.AddPath(wspath.New(c, sv.cfg.Path))
 	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], r.RemoteAddr)
 	start := time.Now()
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
-	go sv.dropIfOrphaned(ss, first)
 	go func() {
 		pipe(s, target)
 		sv.mu.Lock()
@@ -287,29 +254,6 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 		}
 		sv.cfg.Logger.Printf("session %s: %s after %s", id[:8], reason, time.Since(start).Round(time.Second))
 	}()
-}
-
-// dropIfOrphaned closes ss early when its first path dies before the client
-// was heard from. The handshake response was then most likely lost, and
-// keeping the session would hold a target connection for the whole resume
-// timeout.
-func (sv *Server) dropIfOrphaned(ss *serverSession, first *wspath.Path) {
-	select {
-	case <-first.Done():
-	case <-ss.s.Done():
-		return
-	}
-	if ss.heard.Load() {
-		return
-	}
-	select {
-	case <-time.After(sv.orphanGrace):
-	case <-ss.s.Done():
-		return
-	}
-	if !ss.heard.Load() {
-		ss.s.Abort(errNeverJoined)
-	}
 }
 
 // NumSessions reports how many sessions are open.

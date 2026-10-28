@@ -111,9 +111,13 @@ of them again, in order, on a path when:
 The client chooses the path and the server follows it. Each side fails over
 to a path of its own choosing, and their choices can differ. If both followed
 each other they could keep swapping paths, resending everything each time.
+For the same reason the client sends nothing on a spare path until it starts
+using it. A path that stops delivering only toward the client is left once
+the client's liveness check gives up on it.
 
-Whenever a path is added, each side sends an ACK with its current position on
-it, so the peer can drop what is already delivered.
+When the server adds a path, and when the client adds the path it will send
+on, that side sends an ACK with its current position on it, so the peer can
+drop what is already delivered.
 
 Sending too much is harmless, because duplicates are dropped by sequence
 number. Sending too little is impossible as long as unacknowledged frames are
@@ -142,12 +146,6 @@ close idle WebSockets, and pings also keep them open.
 A session with no path for the resume timeout (default 2 minutes) is closed on
 both sides. A session that is closing waits up to the same time for its
 last data to be acknowledged, since that can take as long as a resume.
-
-If a new session's first path dies before the server has received any frame
-on it, and no other path joins, the server closes the session after 10
-seconds or the resume timeout, whichever is shorter. The handshake response
-was most likely lost, so the client never learned the session id. A client
-that did learn it sends an ACK on every new path, so it is heard at once.
 
 ## Security considerations
 

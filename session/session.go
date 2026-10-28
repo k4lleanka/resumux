@@ -178,8 +178,11 @@ func (s *Session) AddPath(p Path) error {
 	s.mu.Unlock()
 
 	go s.readLoop(ps)
-	// Asynchronous so AddPath never waits for the peer to start reading.
-	go s.resync(ps, becameActive)
+	// The side that leads sends nothing on a spare path, or the follower would
+	// move to it. Asynchronous so AddPath never waits for the peer to read.
+	if becameActive || s.cfg.FollowPeer {
+		go s.resync(ps, becameActive)
+	}
 	return nil
 }
 
@@ -305,7 +308,13 @@ func (s *Session) Close() error {
 		time.Sleep(10 * time.Millisecond)
 		s.mu.Lock()
 	}
+	// A delayed acknowledgement would die with the paths, and the peer would
+	// then wait out its own linger for it.
+	ackPending := s.ackTimer != nil && !s.closed
 	s.mu.Unlock()
+	if ackPending {
+		s.flushAck()
+	}
 
 	s.Abort(nil)
 	return nil
@@ -429,7 +438,7 @@ func (s *Session) handle(ps *pathState, f frame) {
 		return
 	}
 	// The peer sends on the path it considers best. Following it means a path
-	// that only fails in one direction still gets abandoned on both sides.
+	// that only fails toward the leader still gets abandoned on both sides.
 	// Only one side may follow: if both did after picking different paths,
 	// each would chase the other forever, resending everything every time.
 	switched := false

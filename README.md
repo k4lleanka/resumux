@@ -162,6 +162,9 @@ eight characters of the session id. Secrets are never logged.
 - Paths provide failover; they are not combined for more bandwidth.
 - Sessions live in the server's memory, so restarting the server ends them.
 - One server forwards to one target.
+- A connection reset on one end reaches the other end as a normal close. The
+  reverse case is handled: a stream resumux itself loses is reset, never
+  closed normally.
 - If you run it through a CDN, check its terms. Cloudflare, for example,
   restricts using its CDN for video and large files hosted elsewhere.
 

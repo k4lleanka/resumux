@@ -476,3 +476,47 @@ func TestSidesPickingDifferentPathsConverge(t *testing.T) {
 		t.Errorf("%d MiB on the wire for %d MiB of data", w>>20, total>>20)
 	}
 }
+
+// TestSparePathDoesNotMoveFollower adds a path on the leader while the
+// follower is sending. The follower must stay on the path the leader uses,
+// not move to the new one and resend its window there.
+func TestSparePathDoesNotMoveFollower(t *testing.T) {
+	leader := New(Config{})
+	follower := New(Config{FollowPeer: true})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var wire atomic.Int64
+	a1, a2 := slowPair(time.Millisecond, &wire)
+	leader.AddPath(a1)
+	follower.AddPath(a2)
+
+	const total = 16 << 20
+	errc := make(chan error, 1)
+	go pump(follower, make([]byte, total), errc)
+	var got []byte
+	readc := make(chan error, 1)
+	go readAll(leader, &got, readc)
+
+	for range 5 {
+		time.Sleep(20 * time.Millisecond)
+		b1, b2 := slowPair(time.Millisecond, &wire)
+		leader.AddPath(b1)
+		follower.AddPath(b2)
+	}
+
+	select {
+	case err := <-readc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("transfer did not finish")
+	}
+	if len(got) != total {
+		t.Fatalf("got %d bytes, want %d", len(got), total)
+	}
+	if w := wire.Load(); w > total+total/4 {
+		t.Errorf("%d MiB on the wire for %d MiB of data", w>>20, total>>20)
+	}
+}
