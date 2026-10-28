@@ -239,6 +239,25 @@ providers hand out freely, can still open sessions up to `-max-sessions`.
 Pair them with rate limiting at the proxy or CDN, such as a Cloudflare rate
 limiting rule on the WebSocket path.
 
+## Measured behind Cloudflare
+
+One client and server, ten small messages a second each way, through a
+Cloudflare quick tunnel from a home connection in Europe, on pre-release
+builds of this version:
+
+| | Messages | Median round trip | Slowest |
+|---|---|---|---|
+| No faults | 200 of 200, in order | 26 ms | 226 ms |
+| Every path cut, every 5 s | 300 of 300, in order | 24 ms | 194 ms |
+| The path in use silenced, every 8 s | 400 of 400, in order | 26 ms | 2.1 s |
+| Network cable pulled for about 40 s | 1,200 of 1,200, in order | 26 ms | 43 s |
+
+A 16 MiB transfer arrived intact in 3.7 s, and a connection left idle for
+150 s stayed up. When the cable was pulled, both the client and the
+server's Cloudflare connector lost the network, and the session carried on
+once it was back. One run on one connection is not a benchmark; it shows
+what the mechanisms do on a real CDN.
+
 ## Security
 
 - Every path must present the shared token (`Authorization: Bearer`). It is
