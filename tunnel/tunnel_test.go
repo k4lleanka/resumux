@@ -882,3 +882,82 @@ func TestFirstDialTriesNextURL(t *testing.T) {
 		t.Fatalf("took %s to open through the second URL", d.Round(time.Millisecond))
 	}
 }
+
+// TestStrayURLDuringFullOutage reproduces a kick: every path is down, the
+// URL that holds the session is not answering yet, and a URL that reaches
+// another server answers 404. That 404 proves nothing, so the session must
+// wait for the right URL instead of ending.
+func TestStrayURLDuringFullOutage(t *testing.T) {
+	h := startServer(t, ServerConfig{})
+	other := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url, other.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(20 * time.Second))
+	echoOn(t, c, "before")
+
+	h.blocked.Store(true)
+	h.listener.cutAll()
+	time.Sleep(2 * time.Second)
+	h.blocked.Store(false)
+
+	echoOn(t, c, "after")
+}
+
+// TestFirstDialSkipsCDNError checks that an error page from one URL, as a
+// CDN shows when its own connection to the server fails, does not stop the
+// client from opening the session through the next URL.
+func TestFirstDialSkipsCDNError(t *testing.T) {
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "origin unreachable", 522)
+	}))
+	t.Cleanup(cdn.Close)
+	h := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{"ws" + strings.TrimPrefix(cdn.URL, "http"), h.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	echoOn(t, c, "hello")
+}
+
+// TestFirstDialSkipsSilentURL checks that a URL which accepts the connection
+// but never answers holds up a new session for seconds, not for the
+// dialer's whole handshake timeout.
+func TestFirstDialSkipsSilentURL(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() })
+		}
+	}()
+	h := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{"ws://" + l.Addr().String() + "/", h.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	start := time.Now()
+	echoOn(t, c, "hello")
+	if d := time.Since(start); d > 8*time.Second {
+		t.Fatalf("took %s to get past a silent URL", d.Round(time.Millisecond))
+	}
+}

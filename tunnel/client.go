@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -112,6 +113,9 @@ func (cl *Client) Serve(l net.Listener) error {
 // pointless.
 var errSessionGone = errors.New("tunnel: server closed the session")
 
+// errBadToken means the server refused the token.
+var errBadToken = errors.New("tunnel: server rejected the token")
+
 // errSessionFinished means the server ended the session after everything was
 // delivered in both directions.
 var errSessionFinished = errors.New("tunnel: session finished")
@@ -137,7 +141,7 @@ func (cl *Client) dial(ctx context.Context, url string, auth *sessionAuth) (*web
 		case http.StatusGone:
 			return nil, resp, errSessionFinished
 		case http.StatusUnauthorized:
-			return nil, resp, errors.New("tunnel: server rejected the token")
+			return nil, resp, errBadToken
 		}
 		return nil, resp, fmt.Errorf("tunnel: handshake: %s", resp.Status)
 	}
@@ -170,9 +174,10 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 	// The first path keeps the URL that worked; the others take the rest in
 	// turn, so every URL is in use when there are enough paths.
 	urls := cl.cfg.ServerURLs
-	go cl.keepPath(s, auth, urls[firstURL], firstPath)
+	trust := &urlTrust{ok: map[string]bool{urls[firstURL]: true}}
+	go cl.keepPath(s, auth, trust, urls[firstURL], firstPath)
 	for i := 1; i < cl.cfg.Paths; i++ {
-		go cl.keepPath(s, auth, urls[(firstURL+i)%len(urls)], nil)
+		go cl.keepPath(s, auth, trust, urls[(firstURL+i)%len(urls)], nil)
 	}
 
 	// A stream that ended cleanly is not an error, even if a path redial then
@@ -186,22 +191,44 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 }
 
 // dialFirst opens the path that creates the session, trying each URL in turn,
-// and returns the index of the one that worked. Network errors are retried,
-// with backoff after every full round, for up to ResumeTimeout; an answer
-// from the server, such as a rejected token, is final.
+// and returns the index of the one that worked. Any failure moves on to the
+// next URL, since one URL can fail for reasons that say nothing about the
+// others, such as a CDN error page or a certificate for another name. Only a
+// rejected token is final, because the server checks it the same way on
+// every URL. After a round in which some URL failed at the network level,
+// the round is repeated with backoff for up to ResumeTimeout; a round in
+// which every URL gave an answer ends with the last one.
 func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Response, int, error) {
 	urls := cl.cfg.ServerURLs
 	deadline := time.Now().Add(cl.cfg.ResumeTimeout)
 	backoff := 250 * time.Millisecond
-	for attempt := 0; ; attempt++ {
-		i := attempt % len(urls)
-		c, resp, err := cl.dial(ctx, urls[i], nil)
-		var certErr *tls.CertificateVerificationError
-		if err == nil || resp != nil || errors.As(err, &certErr) || time.Now().After(deadline) {
-			return c, resp, i, err
+	for round := 1; ; round++ {
+		var lastErr error
+		var lastResp *http.Response
+		retry := false
+		for i, u := range urls {
+			// Short enough that a URL which never answers does not hold up
+			// the others for long, and longer each round for slow links.
+			actx, cancel := context.WithTimeout(ctx, min(time.Duration(round)*5*time.Second, 15*time.Second))
+			c, resp, err := cl.dial(actx, u, nil)
+			cancel()
+			if err == nil {
+				return c, resp, i, nil
+			}
+			if ctx.Err() != nil {
+				return nil, nil, 0, ctx.Err()
+			}
+			if errors.Is(err, errBadToken) {
+				return nil, resp, i, err
+			}
+			var certErr *tls.CertificateVerificationError
+			if resp == nil && !errors.As(err, &certErr) {
+				retry = true
+			}
+			lastErr, lastResp = err, resp
 		}
-		if i < len(urls)-1 {
-			continue
+		if !retry || time.Now().After(deadline) {
+			return nil, lastResp, 0, lastErr
 		}
 		select {
 		case <-time.After(backoff):
@@ -214,7 +241,7 @@ func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Respons
 
 // keepPath keeps one path slot filled for the lifetime of the session,
 // redialing with backoff whenever its path dies.
-func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, url string, p *wspath.Path) {
+func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, trust *urlTrust, url string, p *wspath.Path) {
 	backoff := 250 * time.Millisecond
 	failures := 0
 	strayWarned := false
@@ -233,6 +260,11 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, url string, p 
 			return
 		default:
 		}
+		// Both directions are finished and acknowledged: the session is only
+		// closing its paths, and a new one would just delay that.
+		if s.Drained() {
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		c, _, err := cl.dial(ctx, url, auth)
@@ -241,12 +273,12 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, url string, p 
 			s.Abort(nil)
 			return
 		}
-		if errors.Is(err, errSessionGone) && s.NumPaths() > 0 {
-			// Another path is still attached, so the server does know the
-			// session: this URL reaches a server that does not. Ending the
-			// session over it would drop a healthy connection, so keep
-			// retrying it like any other failure. If the other paths are in
-			// fact stale, they die within seconds and the next 404 ends it.
+		if errors.Is(err, errSessionGone) && !trust.trusted(url) {
+			// This URL has never carried a path of this session, so it may
+			// reach a server that does not know it, and its 404 proves
+			// nothing. Ending the session over it would drop a connection
+			// that a trusted URL can still resume, as when every path dies
+			// at once. If the session really is gone, it expires.
 			if !strayWarned {
 				cl.cfg.Logger.Printf("session %s: %s reaches a server that does not know this session", auth.id[:8], url)
 				strayWarned = true
@@ -288,6 +320,26 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, url string, p 
 		if err := s.AddPath(p); err != nil {
 			return
 		}
+		trust.mark(url)
 		cl.cfg.Logger.Printf("session %s: path connected, %d open", auth.id[:8], s.NumPaths())
 	}
+}
+
+// urlTrust remembers which URLs have carried a path of one session, and so
+// are known to reach the server that holds it.
+type urlTrust struct {
+	mu sync.Mutex
+	ok map[string]bool
+}
+
+func (u *urlTrust) mark(url string) {
+	u.mu.Lock()
+	u.ok[url] = true
+	u.mu.Unlock()
+}
+
+func (u *urlTrust) trusted(url string) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.ok[url]
 }

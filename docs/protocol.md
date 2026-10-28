@@ -49,9 +49,10 @@ Errors are plain HTTP responses:
 | 503 | a new session was refused: the server has the maximum number of sessions, or is shutting down |
 
 A client that gets 404 while resuming must treat the session as lost, since
-data it sent may not have arrived, unless another of its paths is still
-attached. That path shows the server does know the session, so the URL just
-used reaches a different server; the client keeps retrying it instead.
+data it sent may not have arrived. The exception is a client with several
+URLs, when the URL that answered has never carried a path of this session:
+it may reach a different server, so its 404 proves nothing, and the client
+keeps retrying it. A session that is really gone then expires.
 
 410, which the server only answers to the correct secret, means the session
 finished cleanly and nothing was lost. The server remembers finished
@@ -167,6 +168,12 @@ When a path fails, the client moves to the path it heard from most recently.
 A session with no path for the resume timeout (default 2 minutes) is closed on
 both sides. A session that is closing waits up to the same time for its
 last data to be acknowledged, since that can take as long as a resume.
+
+A side that closes cleanly first sends any acknowledgement it still owes,
+then half-closes each path, with a TCP FIN or a TLS close_notify, and keeps
+reading until the peer closes it too, for at most a second. Closing a
+socket outright while the peer's data is still unread makes the kernel reset
+the connection, which can destroy that last acknowledgement in flight.
 
 ## Security considerations
 

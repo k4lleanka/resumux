@@ -337,6 +337,7 @@ func (s *Session) Close() error {
 		s.flushAck()
 	}
 
+	s.drainPaths()
 	s.Abort(nil)
 	return nil
 }
@@ -682,4 +683,37 @@ func (s *Session) leastQuietLocked(skip *pathState) (*pathState, time.Duration) 
 		}
 	}
 	return best, bestQuiet
+}
+
+// drainTimeout bounds how long Close waits for the peer to close paths that
+// this side has half-closed.
+const drainTimeout = time.Second
+
+// drainPaths half-closes every path that supports it and waits, briefly, for
+// the peer to close them in turn. Until then the read loops keep consuming,
+// so nothing unread is left when the paths are torn down.
+func (s *Session) drainPaths() {
+	s.mu.Lock()
+	paths := append([]*pathState(nil), s.paths...)
+	s.mu.Unlock()
+	half := false
+	for _, ps := range paths {
+		if hc, ok := ps.p.(interface{ CloseWrite() error }); ok {
+			ps.wmu.Lock()
+			hc.CloseWrite()
+			ps.wmu.Unlock()
+			half = true
+		}
+	}
+	if !half {
+		return
+	}
+	deadline := time.Now().Add(drainTimeout)
+	for s.NumPaths() > 0 && time.Now().Before(deadline) {
+		select {
+		case <-s.done:
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }

@@ -63,3 +63,18 @@ func TestServerURLs(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"server": ["wss://a.example/", "wss://a.example:8443/"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	server := fs.String("server", "", "")
+	if err := loadConfig(fs, path); err != nil {
+		t.Fatal(err)
+	}
+	if *server != "wss://a.example/,wss://a.example:8443/" {
+		t.Fatalf("server = %q", *server)
+	}
+}

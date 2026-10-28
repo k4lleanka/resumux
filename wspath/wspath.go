@@ -57,6 +57,8 @@ type Path struct {
 	// Zero means the peer has not been heard from yet.
 	start time.Time
 	heard atomic.Int64
+	// halfClosed stops keepalive pings once CloseWrite has been called.
+	halfClosed atomic.Bool
 }
 
 // New wraps c and starts its keepalive.
@@ -82,7 +84,7 @@ func (p *Path) keepalive() {
 		}
 		// A path that is delivering frames needs no proof that it works, and a
 		// ping would only compete with them for the connection.
-		if p.Quiet() < p.opts.PingInterval {
+		if p.halfClosed.Load() || p.Quiet() < p.opts.PingInterval {
 			continue
 		}
 		p.wmu.Lock()
@@ -139,6 +141,21 @@ func (p *Path) WriteFrame(b []byte) error {
 
 // Done is closed when the path is closed.
 func (p *Path) Done() <-chan struct{} { return p.done }
+
+// CloseWrite tells the peer, after everything written so far, that nothing
+// more follows: a TCP FIN, or a TLS close_notify. The path keeps reading.
+// Closing a socket that still has unread data makes the kernel send a reset,
+// which can destroy the last frames on their way to the peer; a half-close
+// lets them arrive. No pings are sent afterwards.
+func (p *Path) CloseWrite() error {
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	p.halfClosed.Store(true)
+	if cw, ok := p.c.NetConn().(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
 
 // Close closes the underlying connection.
 func (p *Path) Close() error {

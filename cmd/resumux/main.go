@@ -103,6 +103,15 @@ func loadConfig(fs *flag.FlagSet, path string) error {
 		if set[k] {
 			continue
 		}
+		// A list, such as several server URLs, is the comma-separated form
+		// the flag takes.
+		if list, ok := v.([]any); ok {
+			parts := make([]string, len(list))
+			for i, e := range list {
+				parts[i] = fmt.Sprint(e)
+			}
+			v = strings.Join(parts, ",")
+		}
 		if err := fs.Set(k, fmt.Sprint(v)); err != nil {
 			return fmt.Errorf("%s: invalid value %v for %q", path, v, k)
 		}

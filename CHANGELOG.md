@@ -12,3 +12,5 @@ First version.
 - `resumux server` and `resumux client`, with JSON config files.
 - Several server URLs per client, so a session's paths can take different
   routes, such as different CDN edges or a CDN and a direct address.
+- A clean close half-closes each path and waits briefly for the peer, so the
+  last acknowledgement is not lost to a connection reset.

@@ -124,9 +124,10 @@ They can differ in port, so that a CDN serves them as separate connections,
 in address, or in provider, such as one URL through a CDN and one straight to
 the server. The server has to be reachable on each. Cloudflare, for example,
 proxies HTTPS on ports 443, 2053, 2083, 2087, 2096 and 8443. A session gets at
-least one path per URL, and the first connection falls through to the next
-URL when one does not answer. A URL that reaches a different server is logged
-and retried; it does not end a session whose other paths still work.
+least one path per URL, and a new connection falls through to the next URL
+when one fails or is slow to answer. A URL that answers that it does not know
+the session ends it only if that URL has carried one of its paths before; any
+other such URL may reach a different server, so it is logged and retried.
 
 ## Try it on a flaky link
 
@@ -187,6 +188,11 @@ eight characters of the session id. Secrets are never logged.
 - Paths provide failover; they are not combined for more bandwidth.
 - Sessions live in the server's memory, so restarting the server ends them.
 - One server forwards to one target.
+- The target sees every connection as coming from the resumux server, not
+  from the original client, so per-address limits and bans on the target
+  stop working. There is no PROXY protocol support yet.
+- A client with more URLs than the server allows paths per session
+  (`-max-paths`, 8 by default) has its extra paths refused.
 - A connection reset on one end reaches the other end as a normal close. The
   reverse case is handled: a stream resumux itself loses is reset, never
   closed normally.
