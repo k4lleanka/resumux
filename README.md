@@ -160,7 +160,8 @@ instead, where lost packets show up as stalls that hit every connection at
 once:
 
 ```sh
-flakyproxy -listen 127.0.0.1:9000 -upstream 127.0.0.1:8080 -cut-every 0 \n  -delay 150ms -jitter 50ms -hiccup-every 15s -hiccup 1500ms
+flakyproxy -listen 127.0.0.1:9000 -upstream 127.0.0.1:8080 -cut-every 0 \
+  -delay 150ms -jitter 50ms -hiccup-every 15s -hiccup 1500ms
 ```
 
 [examples/sshdemo](examples/sshdemo) runs the whole comparison in one Docker
