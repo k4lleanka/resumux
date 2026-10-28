@@ -5,10 +5,12 @@
 Forward TCP over WebSockets, and keep the connection alive when the network
 underneath it drops.
 
-A TCP connection through resumux survives a dead WebSocket, a switch from
-Wi-Fi to mobile data, a new IP address, or a proxy restarting, as long as a new
-path gets through within the resume timeout (two minutes by default). The
-applications on both ends see a pause, not a disconnect.
+A TCP connection through resumux survives what usually kills it on the way:
+a CDN or proxy restarting, a WebSocket that dies or goes silent, a route that
+drops for a moment. The applications on both ends see a pause, not a
+disconnect. A client that changes networks, from Wi-Fi to mobile data, keeps
+its connections too, as long as a new path gets through within the resume
+timeout: two minutes by default, set with `-resume-timeout`.
 
 It is meant for long-lived TCP connections that have to cross a
 WebSocket-friendly proxy or CDN: SSH, game servers, databases, internal tools.
@@ -222,6 +224,12 @@ sessions that actually start count: attempts that fail, as while the
 target is restarting, cost nothing. Both limits only refuse new sessions,
 with 429. Resuming one never counts, so a client that moves to another
 network mid-session is never cut off.
+
+For a game, a shorter resume timeout, such as `-resume-timeout 30s` on the
+server, still rides out CDN restarts and brief drops, but lets a player whose
+own connection is really gone leave the game sooner. While a session waits,
+the target sees an idle connection, as it would under heavy lag, and its own
+timeouts still apply.
 
 Many people can share one address: a household, or a whole mobile network
 behind carrier-grade NAT. Set the limits for the most players you expect
