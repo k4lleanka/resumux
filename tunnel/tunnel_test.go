@@ -27,7 +27,7 @@ const testToken = "test-token"
 var quiet = log.New(io.Discard, "", 0)
 
 // echoServer accepts TCP connections and echoes everything back.
-func echoServer(t *testing.T) string {
+func echoServer(t testing.TB) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -85,7 +85,7 @@ type harness struct {
 	url      string
 }
 
-func startServer(t *testing.T, cfg ServerConfig) *harness {
+func startServer(t testing.TB, cfg ServerConfig) *harness {
 	t.Helper()
 	if cfg.Token == "" {
 		cfg.Token = testToken
@@ -109,7 +109,7 @@ func startServer(t *testing.T, cfg ServerConfig) *harness {
 	return &harness{server: sv, listener: tl, url: "ws" + strings.TrimPrefix(hs.URL, "http")}
 }
 
-func startClient(t *testing.T, cfg ClientConfig) string {
+func startClient(t testing.TB, cfg ClientConfig) string {
 	t.Helper()
 	if cfg.Token == "" {
 		cfg.Token = testToken
@@ -296,7 +296,7 @@ func TestTooManySessions(t *testing.T) {
 	}
 }
 
-type testWriter struct{ t *testing.T }
+type testWriter struct{ t testing.TB }
 
 func (w testWriter) Write(b []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(b)))
@@ -335,7 +335,7 @@ func TestManyConnectionsWhilePathsAreCut(t *testing.T) {
 }
 
 // listenTarget runs handle for every connection to a new TCP listener.
-func listenTarget(t *testing.T, handle func(*net.TCPConn)) string {
+func listenTarget(t testing.TB, handle func(*net.TCPConn)) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -414,7 +414,7 @@ func TestTargetClosesFirst(t *testing.T) {
 	}
 }
 
-func startTLSServer(t *testing.T) (*httptest.Server, string) {
+func startTLSServer(t testing.TB) (*httptest.Server, string) {
 	t.Helper()
 	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: quiet})
 	if err != nil {

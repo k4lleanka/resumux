@@ -40,11 +40,27 @@ filling memory.
 
 ## Install
 
+Download a binary for Linux, macOS or Windows from the
+[releases page](https://github.com/k4lleanka/resumux/releases). Each release
+lists SHA-256 checksums and has a build provenance attestation, which you can
+check with the GitHub CLI:
+
+```sh
+gh attestation verify resumux-v0.1.0-linux-amd64 --repo k4lleanka/resumux
+```
+
+Or build from source with Go 1.24 or newer:
+
 ```sh
 go install github.com/k4lleanka/resumux/cmd/resumux@latest
 ```
 
-Requires Go 1.24 or newer.
+Or build the container image, which runs as a non-root user:
+
+```sh
+docker build -t resumux .
+docker run --rm resumux version
+```
 
 ## Quick start
 
@@ -105,6 +121,23 @@ Every three seconds flakyproxy logs `cut 4 connections`, which takes down both
 paths of the session at once, and the SSH session carries on. Put flakyproxy
 straight in front of port 22 instead, without resumux, and SSH drops at the
 first cut.
+
+[examples/sshdemo](examples/sshdemo) runs the whole comparison in one Docker
+container with a real OpenSSH server.
+
+## Overhead
+
+Measured on one machine over loopback, so this is the cost of resumux itself,
+not of the network:
+
+| | Direct TCP | Through resumux |
+|---|---|---|
+| Round trip of one byte | 0.04 ms | 0.16 ms |
+| Throughput | ~990 MB/s | ~120 MB/s |
+
+Over the internet the path to the server, and through a CDN its nearest edge,
+adds far more than this. Run the benchmarks yourself with
+`go test -run '^$' -bench . ./tunnel/`.
 
 ## Security
 
