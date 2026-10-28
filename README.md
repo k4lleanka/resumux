@@ -204,6 +204,41 @@ The safest setup is a server that listens on loopback only, with the CDN's
 connector, such as cloudflared, on the same machine. Then nothing off that
 machine can reach the server except through the CDN.
 
+## Public servers
+
+A token handed out with a public client, such as in a game launcher, is an
+access key, not a secret: anyone can take it from the client. Then nothing
+stops one address from opening every session the server allows. Limit what
+each client may hold and open:
+
+```sh
+  -max-sessions-per-client 8 -max-new-sessions-per-client 30
+```
+
+The first is how many sessions one address, or one IPv6 /64, may hold at
+once; the second, how many it may open per minute, counted in fixed
+one-minute windows, so briefly up to twice that around a window's end. Only
+sessions that actually start count: attempts that fail, as while the
+target is restarting, cost nothing. Both limits only refuse new sessions,
+with 429. Resuming one never counts, so a client that moves to another
+network mid-session is never cut off.
+
+Many people can share one address: a household, or a whole mobile network
+behind carrier-grade NAT. Set the limits for the most players you expect
+behind one address, not for one player, and leave headroom: a session
+whose handshake answer was lost keeps its slot until it expires, two
+minutes by default. Addresses that stand for many clients are never
+counted: loopback, link-local, and trusted proxies whose client could not
+be told, including when the client address header holds something that is
+not an address. Behind a proxy, configure it as described above, or every
+client looks like the proxy.
+
+These limits stop one address, not many. An attacker with many IPv4
+addresses, or with an IPv6 /48, which holds 65,536 /64s and some hosting
+providers hand out freely, can still open sessions up to `-max-sessions`.
+Pair them with rate limiting at the proxy or CDN, such as a Cloudflare rate
+limiting rule on the WebSocket path.
+
 ## Security
 
 - Every path must present the shared token (`Authorization: Bearer`). It is

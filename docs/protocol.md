@@ -44,7 +44,7 @@ Errors are plain HTTP responses:
 | 401 | wrong or missing token |
 | 404 | unknown session, or wrong secret (deliberately indistinguishable) |
 | 410 | the session ended after everything was delivered in both directions |
-| 429 | the session already has the maximum number of paths |
+| 429 | the session already has the maximum number of paths, or the client has too many sessions or opened too many recently |
 | 502 | the server could not connect to its target |
 | 503 | a new session was refused: the server has the maximum number of sessions, or is shutting down |
 

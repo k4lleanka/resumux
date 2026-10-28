@@ -5,11 +5,14 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 
@@ -142,6 +145,11 @@ func (cl *Client) dial(ctx context.Context, url string, auth *sessionAuth) (*web
 			return nil, resp, errSessionFinished
 		case http.StatusUnauthorized:
 			return nil, resp, errBadToken
+		}
+		// The body says why, e.g. which limit a 429 hit.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		if msg := strings.TrimSpace(string(body)); msg != "" && utf8.ValidString(msg) {
+			return nil, resp, fmt.Errorf("tunnel: handshake: %s: %s", resp.Status, msg)
 		}
 		return nil, resp, fmt.Errorf("tunnel: handshake: %s", resp.Status)
 	}

@@ -42,6 +42,14 @@ type ServerConfig struct {
 	// ClientIPHeader is the request header in which trusted proxies give
 	// the client's address, e.g. CF-Connecting-IP.
 	ClientIPHeader string
+	// MaxSessionsPerClient limits how many sessions one client address, or
+	// one IPv6 /64, may hold at once. Zero means no limit.
+	MaxSessionsPerClient int
+	// MaxNewSessionsPerClient limits how many sessions one client may open
+	// per minute. Zero means no limit. Neither limit applies to resuming a
+	// session, nor to loopback or trusted proxy addresses, which stand for
+	// many clients.
+	MaxNewSessionsPerClient int
 
 	Path    wspath.Options
 	Session session.Config
@@ -92,6 +100,8 @@ type Server struct {
 	// delivered, so a client resuming one learns it is done, not lost.
 	finished map[string]string
 	closed   bool
+
+	limits *clientLimits
 }
 
 // ErrSessionExpired is the reason a session closes after ResumeTimeout
@@ -118,6 +128,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		},
 		sessions: make(map[string]*serverSession),
 		finished: make(map[string]string),
+		limits:   newClientLimits(cfg),
 	}, nil
 }
 
@@ -200,13 +211,30 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	client := clientAddr(r, sv.cfg)
+	slot, report, err := sv.limits.acquire(client.Addr(), time.Now())
+	if err != nil {
+		if report {
+			sv.cfg.Logger.Printf("refused %s: %v (if that address is a proxy, add it to the trusted proxies)", client.Addr(), err)
+		}
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
+	// Every way out below gives the count back, and refunds the attempt,
+	// except the one that starts the session, which hands it to the session.
+	started := false
+	defer func() {
+		if !started {
+			slot.cancel()
+		}
+	}()
+
 	target, err := net.DialTimeout("tcp", sv.cfg.Target, sv.cfg.DialTimeout)
 	if err != nil {
 		sv.cfg.Logger.Printf("dial target: %v", err)
 		http.Error(w, "target unavailable", http.StatusBadGateway)
 		return
 	}
-	client := clientAddr(r, sv.cfg)
 	if sv.cfg.ProxyProtocol {
 		target.SetWriteDeadline(time.Now().Add(sv.cfg.DialTimeout))
 		_, err := target.Write(proxyHeader(client, localAddr(r)))
@@ -258,9 +286,11 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	s.AddPath(wspath.New(c, sv.cfg.Path))
 	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], client)
 	start := time.Now()
+	started = true
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
 	go func() {
 		pipe(s, target)
+		slot.release()
 		sv.mu.Lock()
 		delete(sv.sessions, id)
 		if s.Drained() {

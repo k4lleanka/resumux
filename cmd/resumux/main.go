@@ -160,6 +160,8 @@ func runServer(args []string) error {
 	proxyProto := fs.Bool("proxy-protocol", false, "begin each connection to the target with a PROXY protocol v2 header naming the client")
 	trustedProxies := fs.String("trusted-proxies", "", "comma-separated addresses or CIDR ranges of proxies allowed to name the client in -client-ip-header")
 	clientIPHeader := fs.String("client-ip-header", "", "header in which trusted proxies name the client, e.g. CF-Connecting-IP")
+	perClient := fs.Int("max-sessions-per-client", 0, "sessions one client address may hold at once (0: no limit)")
+	newPerClient := fs.Int("max-new-sessions-per-client", 0, "sessions one client address may open per minute (0: no limit)")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -177,6 +179,12 @@ func runServer(args []string) error {
 	if (len(proxies) == 0) != (*clientIPHeader == "") {
 		return errors.New("-trusted-proxies and -client-ip-header must be given together")
 	}
+	if *perClient < 0 || *newPerClient < 0 {
+		return errors.New("per-client limits cannot be negative")
+	}
+	if (*perClient > 0 || *newPerClient > 0) && len(proxies) == 0 {
+		log.Printf("per-client limits see only the address each request comes from. Behind a proxy or CDN connector, set -trusted-proxies and -client-ip-header, or every client looks like the proxy: unlimited if it is on this machine, limited together if it is not")
+	}
 	if !strings.HasPrefix(*path, "/") {
 		return fmt.Errorf("-path must start with /, got %q", *path)
 	}
@@ -189,15 +197,17 @@ func runServer(args []string) error {
 	}
 
 	sv, err := tunnel.NewServer(tunnel.ServerConfig{
-		Token:              token,
-		Target:             *target,
-		MaxSessions:        *maxSessions,
-		MaxPathsPerSession: *maxPaths,
-		ResumeTimeout:      *resume,
-		Path:               pathOptions(*deadAfter),
-		ProxyProtocol:      *proxyProto,
-		TrustedProxies:     proxies,
-		ClientIPHeader:     *clientIPHeader,
+		Token:                   token,
+		Target:                  *target,
+		MaxSessions:             *maxSessions,
+		MaxPathsPerSession:      *maxPaths,
+		ResumeTimeout:           *resume,
+		Path:                    pathOptions(*deadAfter),
+		ProxyProtocol:           *proxyProto,
+		TrustedProxies:          proxies,
+		ClientIPHeader:          *clientIPHeader,
+		MaxSessionsPerClient:    *perClient,
+		MaxNewSessionsPerClient: *newPerClient,
 	})
 	if err != nil {
 		return err

@@ -18,3 +18,8 @@ First version.
   protocol v2 header. A proxy's client-address header is used only on
   requests from `-trusted-proxies`.
 - `flakyproxy -freeze` silences a connection without closing it.
+- `-max-sessions-per-client` and `-max-new-sessions-per-client` stop one
+  address from taking every session, which matters when the token ships
+  with a public client. They never apply to resuming a session.
+- A refused handshake reports the server's reason, such as which limit was
+  hit.
