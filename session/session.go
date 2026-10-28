@@ -159,9 +159,10 @@ func (s *Session) NumPaths() int {
 	return len(s.paths)
 }
 
-// AddPath attaches a path and starts reading from it. The peer is told what
-// has been received so far, and if no other path is active, everything still
-// unacknowledged is sent again on this one.
+// AddPath attaches a path and starts reading from it. If no other path is
+// active, the peer is told what has been received so far and everything
+// still unacknowledged is sent again on this one. A follower also tells the
+// peer on every other path it adds.
 func (s *Session) AddPath(p Path) error {
 	s.mu.Lock()
 	if s.closed {
