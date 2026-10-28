@@ -14,8 +14,8 @@ It is meant for long-lived TCP connections that have to cross a
 WebSocket-friendly proxy or CDN: SSH, game servers, databases, internal tools.
 
 > **Status:** new and pre-1.0. The protocol may still change between versions.
-> It has been tested through Cloudflare, with idle connections and repeated
-> path cuts, but has no production use yet.
+> It has been tested through Cloudflare with idle connections, repeated path
+> cuts and silent paths, but has no production use yet.
 
 ## How it works
 
