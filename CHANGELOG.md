@@ -23,3 +23,4 @@ First version.
   with a public client. They never apply to resuming a session.
 - A refused handshake reports the server's reason, such as which limit was
   hit.
+- `flakyproxy -delay -jitter -hiccup-every` imitates a long, lossy route.

@@ -155,6 +155,14 @@ dropping data both ways without closing it, like a proxy that loses a path
 without telling anyone. The session then moves to its other path in about
 two seconds.
 
+`-delay`, `-jitter` and `-hiccup-every` make it act like a long, lossy route
+instead, where lost packets show up as stalls that hit every connection at
+once:
+
+```sh
+flakyproxy -listen 127.0.0.1:9000 -upstream 127.0.0.1:8080 -cut-every 0 \n  -delay 150ms -jitter 50ms -hiccup-every 15s -hiccup 1500ms
+```
+
 [examples/sshdemo](examples/sshdemo) runs the whole comparison in one Docker
 container with a real OpenSSH server.
 
