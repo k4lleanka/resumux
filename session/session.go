@@ -118,6 +118,8 @@ type Session struct {
 	paths  []*pathState
 	active *pathState
 
+	finRead bool // the peer's FIN has been returned by Read
+
 	closed bool
 	err    error
 	done   chan struct{}
@@ -235,6 +237,7 @@ func (s *Session) Read(b []byte) (int, error) {
 	}
 	it := s.readQ[0]
 	if it.fin {
+		s.finRead = true
 		s.markConsumedLocked(it.seq)
 		return 0, io.EOF
 	}
@@ -531,4 +534,31 @@ func (s *Session) flushAck() {
 	ps := s.active
 	s.mu.Unlock()
 	s.send(ps, enc)
+}
+
+// Complete reports whether the session's work is done: everything the peer
+// sent, up to its CloseWrite, has been read, and the peer has acknowledged
+// all data sent to it. Only the acknowledgement of this side's own
+// CloseWrite may still be outstanding, which loses nothing.
+func (s *Session) Complete() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.finRead {
+		return false
+	}
+	for _, f := range s.unacked {
+		if f.kind != frameFin {
+			return false
+		}
+	}
+	return true
+}
+
+// Drained reports whether everything was delivered in both directions: the
+// peer's CloseWrite has been read and the peer acknowledged everything sent
+// to it, including this side's CloseWrite.
+func (s *Session) Drained() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finRead && s.writeClosed && len(s.unacked) == 0
 }

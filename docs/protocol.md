@@ -43,11 +43,15 @@ Errors are plain HTTP responses:
 | 400 | missing or unsupported `Resumux-Version` |
 | 401 | wrong or missing token |
 | 404 | unknown session, or wrong secret (deliberately indistinguishable) |
+| 410 | the session ended after everything was delivered in both directions |
 | 429 | the session already has the maximum number of paths |
 | 502 | the server could not connect to its target |
 | 503 | the server has the maximum number of sessions, or is shutting down |
 
-A client that gets 404 while resuming must treat the session as gone.
+A client that gets 404 while resuming must treat the session as lost: data it
+sent may not have arrived. 410, which the server only answers to the correct
+secret, means the session finished cleanly and nothing was lost. The server
+remembers finished sessions for the resume timeout.
 
 ## Frames
 
@@ -130,7 +134,8 @@ path as dead after 30 seconds without receiving anything. CDNs and proxies
 close idle WebSockets, and pings also keep them open.
 
 A session with no path for the resume timeout (default 2 minutes) is closed on
-both sides.
+both sides. A session that is closing waits up to the same time for its
+last data to be acknowledged, since that can take as long as a resume.
 
 ## Security considerations
 

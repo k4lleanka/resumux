@@ -52,6 +52,11 @@ func (c ServerConfig) withDefaults() ServerConfig {
 	if c.Logger == nil {
 		c.Logger = log.Default()
 	}
+	// A closing session waits for its last data to be acknowledged; that can
+	// take as long as a resume, so it must not give up sooner.
+	if c.Session.Linger <= 0 {
+		c.Session.Linger = c.ResumeTimeout
+	}
 	return c
 }
 
@@ -67,6 +72,9 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]*serverSession
+	// finished remembers the secrets of sessions that ended with everything
+	// delivered, so a client resuming one learns it is done, not lost.
+	finished map[string]string
 	closed   bool
 }
 
@@ -89,6 +97,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
 		sessions: make(map[string]*serverSession),
+		finished: make(map[string]string),
 	}, nil
 }
 
@@ -118,12 +127,18 @@ func (sv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (sv *Server) resume(w http.ResponseWriter, r *http.Request, id string) {
+	secret := r.Header.Get(headerSecret)
 	sv.mu.Lock()
 	ss, ok := sv.sessions[id]
+	doneSecret, done := sv.finished[id]
 	sv.mu.Unlock()
+	if !ok && done && equalSecret(secret, doneSecret) {
+		http.Error(w, "session finished", http.StatusGone)
+		return
+	}
 	// Unknown session and wrong secret look the same, so neither reveals
 	// whether an id exists.
-	if !ok || !equalSecret(r.Header.Get(headerSecret), ss.secret) {
+	if !ok || !equalSecret(secret, ss.secret) {
 		http.Error(w, "unknown session", http.StatusNotFound)
 		return
 	}
@@ -200,6 +215,14 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 		pipe(s, target)
 		sv.mu.Lock()
 		delete(sv.sessions, id)
+		if s.Drained() {
+			sv.finished[id] = secret
+			time.AfterFunc(sv.cfg.ResumeTimeout, func() {
+				sv.mu.Lock()
+				delete(sv.finished, id)
+				sv.mu.Unlock()
+			})
+		}
 		sv.mu.Unlock()
 		reason := "closed"
 		if err := s.Err(); err != nil {

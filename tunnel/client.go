@@ -51,6 +51,11 @@ func (c ClientConfig) withDefaults() ClientConfig {
 	if c.Logger == nil {
 		c.Logger = log.Default()
 	}
+	// A closing session waits for its last data to be acknowledged; that can
+	// take as long as a resume, so it must not give up sooner.
+	if c.Session.Linger <= 0 {
+		c.Session.Linger = c.ResumeTimeout
+	}
 	return c
 }
 
@@ -89,6 +94,10 @@ func (cl *Client) Serve(l net.Listener) error {
 // pointless.
 var errSessionGone = errors.New("tunnel: server closed the session")
 
+// errSessionFinished means the server ended the session after everything was
+// delivered in both directions.
+var errSessionFinished = errors.New("tunnel: session finished")
+
 type sessionAuth struct{ id, secret string }
 
 func (cl *Client) dial(ctx context.Context, auth *sessionAuth) (*websocket.Conn, *http.Response, error) {
@@ -107,6 +116,8 @@ func (cl *Client) dial(ctx context.Context, auth *sessionAuth) (*websocket.Conn,
 		switch resp.StatusCode {
 		case http.StatusNotFound:
 			return nil, resp, errSessionGone
+		case http.StatusGone:
+			return nil, resp, errSessionFinished
 		case http.StatusUnauthorized:
 			return nil, resp, errors.New("tunnel: server rejected the token")
 		}
@@ -178,6 +189,7 @@ func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Respons
 // redialing with backoff whenever its path dies.
 func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, p *wspath.Path) {
 	backoff := 250 * time.Millisecond
+	failures := 0
 	for {
 		if p != nil {
 			select {
@@ -197,11 +209,28 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, p *wspath.Path
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		c, _, err := cl.dial(ctx, auth)
 		cancel()
+		if errors.Is(err, errSessionFinished) {
+			s.Abort(nil)
+			return
+		}
 		if errors.Is(err, errSessionGone) {
-			s.Abort(err)
+			// The server forgets a session once it has finished with it. If
+			// nothing is missing on this side either, that is a normal end,
+			// not a loss, and there is no peer left to wait for.
+			if s.Complete() {
+				s.Abort(nil)
+			} else {
+				s.Abort(err)
+			}
 			return
 		}
 		if err != nil {
+			// Log the first failure of a streak; the success that ends it is
+			// logged below.
+			if failures == 0 {
+				cl.cfg.Logger.Printf("session %s: reconnecting: %v", auth.id[:8], err)
+			}
+			failures++
 			p = nil
 			select {
 			case <-time.After(backoff):
@@ -210,6 +239,10 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, p *wspath.Path
 			}
 			backoff = min(backoff*2, 5*time.Second)
 			continue
+		}
+		if failures > 0 {
+			cl.cfg.Logger.Printf("session %s: reconnected after %d failed attempts", auth.id[:8], failures)
+			failures = 0
 		}
 		backoff = 250 * time.Millisecond
 		p = wspath.New(c, cl.cfg.Path)

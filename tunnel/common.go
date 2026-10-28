@@ -49,6 +49,9 @@ func equalSecret(a, b string) bool {
 func pipe(s *session.Session, c net.Conn) error {
 	go func() {
 		<-s.Done()
+		if s.Err() != nil {
+			resetConn(c)
+		}
 		c.Close()
 	}()
 
@@ -63,6 +66,13 @@ func pipe(s *session.Session, c net.Conn) error {
 	go func() {
 		defer wg.Done()
 		_, recvErr = io.Copy(c, s)
+		if recvErr != nil {
+			// The stream was cut short. Reset the connection so the
+			// application sees an error rather than a clean end of data.
+			resetConn(c)
+			c.Close()
+			return
+		}
 		if cw, ok := c.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
 		} else {
@@ -96,5 +106,12 @@ func expireWithoutPaths(s *session.Session, timeout time.Duration, err error) {
 				return
 			}
 		}
+	}
+}
+
+// resetConn makes the next Close send a TCP reset instead of a normal close.
+func resetConn(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		tc.SetLinger(0)
 	}
 }

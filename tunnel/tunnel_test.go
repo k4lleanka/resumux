@@ -16,10 +16,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/k4lleanka/resumux/session"
+	"github.com/k4lleanka/resumux/wspath"
 )
 
 const testToken = "test-token"
@@ -83,6 +87,9 @@ type harness struct {
 	server   *Server
 	listener *trackingListener
 	url      string
+	// blocked makes the server refuse every handshake, as if it were
+	// unreachable.
+	blocked atomic.Bool
 }
 
 func startServer(t testing.TB, cfg ServerConfig) *harness {
@@ -93,20 +100,28 @@ func startServer(t testing.TB, cfg ServerConfig) *harness {
 	if cfg.Target == "" {
 		cfg.Target = echoServer(t)
 	}
-	cfg.Logger = quiet
+	cfg.Logger = testLogger(t, "server: ")
 	sv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := httptest.NewUnstartedServer(sv)
-	tl := &trackingListener{Listener: hs.Listener}
-	hs.Listener = tl
+	h := &harness{server: sv}
+	hs := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.blocked.Load() {
+			http.Error(w, "unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		sv.ServeHTTP(w, r)
+	}))
+	h.listener = &trackingListener{Listener: hs.Listener}
+	hs.Listener = h.listener
 	hs.Start()
 	t.Cleanup(func() {
 		sv.Close()
 		hs.Close()
 	})
-	return &harness{server: sv, listener: tl, url: "ws" + strings.TrimPrefix(hs.URL, "http")}
+	h.url = "ws" + strings.TrimPrefix(hs.URL, "http")
+	return h
 }
 
 func startClient(t testing.TB, cfg ClientConfig) string {
@@ -114,7 +129,7 @@ func startClient(t testing.TB, cfg ClientConfig) string {
 	if cfg.Token == "" {
 		cfg.Token = testToken
 	}
-	cfg.Logger = log.New(testWriter{t}, "", 0)
+	cfg.Logger = testLogger(t, "client: ")
 	cl, err := NewClient(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -296,12 +311,29 @@ func TestTooManySessions(t *testing.T) {
 	}
 }
 
-type testWriter struct{ t testing.TB }
-
-func (w testWriter) Write(b []byte) (int, error) {
-	w.t.Log(strings.TrimSpace(string(b)))
-	return len(b), nil
+// testLogger collects log output and prints it only if the test fails.
+// Client and server goroutines can outlive a test, so writing straight to
+// t.Log would race with the test finishing.
+func testLogger(t testing.TB, prefix string) *log.Logger {
+	var mu sync.Mutex
+	var buf strings.Builder
+	t.Cleanup(func() {
+		if t.Failed() {
+			mu.Lock()
+			t.Log("\n" + buf.String())
+			mu.Unlock()
+		}
+	})
+	return log.New(writerFunc(func(b []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(b)
+	}), prefix, log.Lmicroseconds)
 }
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
 func TestManyConnectionsWhilePathsAreCut(t *testing.T) {
 	h := startServer(t, ServerConfig{})
@@ -462,5 +494,135 @@ func TestTLSWithUntrustedCertificateFailsFast(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %s to give up", d)
+	}
+}
+
+// cutAll closes every connection accepted so far.
+func (l *trackingListener) cutAll() {
+	for l.cutOne() {
+	}
+}
+
+// TestTailSurvivesOutageAfterServerFinishes reproduces data loss seen
+// behind a CDN: the server had sent everything and was closing, waiting for
+// the client to acknowledge the last data, while the client's paths were
+// down. Closing must wait as long as a resume could take, so nothing is lost.
+func TestTailSurvivesOutageAfterServerFinishes(t *testing.T) {
+	want := randomData(t, 2<<20)
+	target := listenTarget(t, func(c *net.TCPConn) {
+		io.Copy(io.Discard, c)
+		c.Write(want)
+		c.Close()
+	})
+	h := startServer(t, ServerConfig{Target: target})
+	addr := startClient(t, ClientConfig{ServerURL: h.url})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.(*net.TCPConn).CloseWrite()
+
+	// Let the reply reach the client without reading it, so it stays
+	// unacknowledged on the server while the server finishes and closes.
+	time.Sleep(500 * time.Millisecond)
+	h.blocked.Store(true)
+	h.listener.cutAll()
+	time.Sleep(7 * time.Second)
+	h.blocked.Store(false)
+
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// TestLostSessionIsAnErrorNotEOF checks that when a session cannot be
+// resumed, the application sees its connection fail, not a normal end of
+// data that would hide the loss.
+func TestLostSessionIsAnErrorNotEOF(t *testing.T) {
+	target := listenTarget(t, func(c *net.TCPConn) {
+		defer c.Close()
+		buf := make([]byte, 1024)
+		for {
+			if _, err := c.Write(buf); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	h := startServer(t, ServerConfig{Target: target, ResumeTimeout: 500 * time.Millisecond})
+	addr := startClient(t, ClientConfig{ServerURL: h.url, ResumeTimeout: 500 * time.Millisecond})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(20 * time.Second))
+	if _, err := io.ReadFull(c, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+
+	h.blocked.Store(true)
+	h.listener.cutAll()
+	_, err = io.Copy(io.Discard, c)
+	if err == nil {
+		t.Fatal("connection ended with a clean EOF after its session was lost")
+	}
+	t.Logf("application saw: %v", err)
+}
+
+// TestResumeFinishedSession checks that a client resuming a session the
+// server finished cleanly learns that it is done (410), while a wrong secret
+// still cannot tell a finished session from an unknown one (404).
+func TestResumeFinishedSession(t *testing.T) {
+	h := startServer(t, ServerConfig{})
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+testToken)
+	hdr.Set(headerVersion, protocolVersion)
+	c, resp, err := websocket.DefaultDialer.Dial(h.url, hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, secret := resp.Header.Get(headerSession), resp.Header.Get(headerSecret)
+
+	s := session.New(session.Config{})
+	defer s.Abort(nil)
+	s.AddPath(wspath.New(c, wspath.Options{}))
+	s.Write([]byte("hello"))
+	s.CloseWrite()
+	if got, err := io.ReadAll(s); err != nil || string(got) != "hello" {
+		t.Fatalf("echo: %q, %v", got, err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for h.server.NumSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("session did not finish")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	resumeStatus := func(secret string) int {
+		hdr.Set(headerSession, id)
+		hdr.Set(headerSecret, secret)
+		_, resp, err := websocket.DefaultDialer.Dial(h.url, hdr)
+		if err == nil || resp == nil {
+			t.Fatalf("resume of a finished session: err=%v resp=%v", err, resp)
+		}
+		return resp.StatusCode
+	}
+	if got := resumeStatus(secret); got != http.StatusGone {
+		t.Errorf("right secret: got %d, want 410", got)
+	}
+	if got := resumeStatus(strings.Repeat("0", 64)); got != http.StatusNotFound {
+		t.Errorf("wrong secret: got %d, want 404", got)
 	}
 }
