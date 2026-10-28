@@ -92,6 +92,10 @@ Run `resumux server -h` and `resumux client -h` for all flags.
 | [wstunnel](https://github.com/erebe/wstunnel) | yes | no | no |
 | [Eternal Terminal](https://eternalterminal.dev) | no | yes, for terminal sessions | no |
 
+Based on each project's documentation in October 2026. chisel and wstunnel
+reconnect the WebSocket, but neither documents keeping connections that were
+open when it dropped.
+
 ## Building
 
 ```sh
