@@ -56,6 +56,7 @@ func (c ClientConfig) withDefaults() ClientConfig {
 	if c.Session.Linger <= 0 {
 		c.Session.Linger = c.ResumeTimeout
 	}
+	c.Session.FollowPeer = false
 	return c
 }
 

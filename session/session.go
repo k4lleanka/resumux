@@ -33,13 +33,17 @@ type Config struct {
 	SendWindow int
 	// RecvWindow is how much received data may be buffered before the peer is
 	// considered misbehaving and the session is aborted, counted the same
-	// way. It must be at least the peer's SendWindow.
+	// way. It must exceed the peer's SendWindow by at least 64 bytes, which
+	// is what the final FIN counts as.
 	RecvWindow int
 	// AckDelay is how long the receiver waits to batch acknowledgements.
 	AckDelay time.Duration
 	// Linger is how long Close waits for the peer to acknowledge outstanding
 	// data before tearing the paths down.
 	Linger time.Duration
+	// FollowPeer makes the session send on whichever path the peer last sent
+	// on. Set it on exactly one of the two sides.
+	FollowPeer bool
 }
 
 func (c Config) withDefaults() Config {
@@ -426,8 +430,10 @@ func (s *Session) handle(ps *pathState, f frame) {
 	}
 	// The peer sends on the path it considers best. Following it means a path
 	// that only fails in one direction still gets abandoned on both sides.
+	// Only one side may follow: if both did after picking different paths,
+	// each would chase the other forever, resending everything every time.
 	switched := false
-	if s.active != ps {
+	if s.cfg.FollowPeer && s.active != ps {
 		s.active = ps
 		switched = true
 	}

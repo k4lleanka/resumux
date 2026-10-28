@@ -87,7 +87,7 @@ func pipe(s *session.Session, c net.Conn) error {
 
 // expireWithoutPaths aborts s once it has had no path for longer than timeout.
 func expireWithoutPaths(s *session.Session, timeout time.Duration, err error) {
-	t := time.NewTicker(timeout / 10)
+	t := time.NewTicker(max(timeout/10, time.Millisecond))
 	defer t.Stop()
 	var since time.Time
 	for {

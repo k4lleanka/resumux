@@ -46,7 +46,7 @@ Errors are plain HTTP responses:
 | 410 | the session ended after everything was delivered in both directions |
 | 429 | the session already has the maximum number of paths |
 | 502 | the server could not connect to its target |
-| 503 | the server has the maximum number of sessions, or is shutting down |
+| 503 | a new session was refused: the server has the maximum number of sessions, or is shutting down |
 
 A client that gets 404 while resuming must treat the session as lost: data it
 sent may not have arrived. 410, which the server only answers to the correct
@@ -104,11 +104,16 @@ of them again, in order, on a path when:
 
 - that path becomes the one it sends on, after the previous one failed, or
 - it is the first path of a session that had none, or
-- frames start arriving from the peer on a different path than before. The
-  peer moved for a reason, so whatever was sent on the old path may be lost.
+- on the server only: frames start arriving from the client on a different
+  path than before. The client moved for a reason, so whatever was sent on
+  the old path may be lost.
 
-Whenever a path is added, each side first sends an ACK with its current
-position, so the peer can drop what is already delivered.
+The client chooses the path and the server follows it. Each side fails over
+to a path of its own choosing, and their choices can differ. If both followed
+each other they could keep swapping paths, resending everything each time.
+
+Whenever a path is added, each side sends an ACK with its current position on
+it, so the peer can drop what is already delivered.
 
 Sending too much is harmless, because duplicates are dropped by sequence
 number. Sending too little is impossible as long as unacknowledged frames are
@@ -124,8 +129,9 @@ so many tiny frames cannot use more memory than the window suggests.
 - **Receive window.** A receiver aborts the session if buffered frames, read or
   waiting for a gap, would exceed its receive window (default 8 MiB), or if a
   frame's sequence number is further ahead of the next expected one than the
-  window could hold. The receive window must be at least the peer's send
-  window; a peer that respects its own window never triggers this.
+  window could hold. The receive window must exceed the peer's send window by
+  at least 64 bytes, since the FIN is sent even when the window is full; a
+  peer that respects its own window then never triggers this.
 
 ## Liveness
 
@@ -136,6 +142,12 @@ close idle WebSockets, and pings also keep them open.
 A session with no path for the resume timeout (default 2 minutes) is closed on
 both sides. A session that is closing waits up to the same time for its
 last data to be acknowledged, since that can take as long as a resume.
+
+If a new session's first path dies before the server has received any frame
+on it, and no other path joins, the server closes the session after 10
+seconds or the resume timeout, whichever is shorter. The handshake response
+was most likely lost, so the client never learned the session id. A client
+that did learn it sends an ACK on every new path, so it is heard at once.
 
 ## Security considerations
 

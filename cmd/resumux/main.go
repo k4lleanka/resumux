@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -80,8 +81,12 @@ func loadConfig(fs *flag.FlagSet, path string) error {
 	if err != nil {
 		return err
 	}
+	// UseNumber keeps numbers as written; as floats, 1000000 would print as
+	// 1e+06 and fail to parse as an int.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var values map[string]any
-	if err := json.Unmarshal(data, &values); err != nil {
+	if err := dec.Decode(&values); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	set := map[string]bool{}
@@ -97,7 +102,7 @@ func loadConfig(fs *flag.FlagSet, path string) error {
 			continue
 		}
 		if err := fs.Set(k, fmt.Sprint(v)); err != nil {
-			return fmt.Errorf("%s: %s: %w", path, k, err)
+			return fmt.Errorf("%s: invalid value %v for %q", path, v, k)
 		}
 	}
 	return nil
@@ -173,6 +178,9 @@ func runServer(args []string) error {
 		Addr:              *listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Hijacked WebSocket connections are not affected; this only drops
+		// idle keep-alive connections, such as after a rejected handshake.
+		IdleTimeout: time.Minute,
 	}
 
 	ctx, stop := signalContext()

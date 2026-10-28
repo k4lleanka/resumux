@@ -8,6 +8,7 @@ import (
 	"io"
 	mrand "math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -400,4 +401,78 @@ func FuzzSessionInput(f *testing.F) {
 			t.Fatal("session stuck")
 		}
 	})
+}
+
+// slowPair is a memPair whose frames take delay to arrive, and which counts
+// the bytes written into it.
+func slowPair(delay time.Duration, wire *atomic.Int64) (*memPath, *memPath) {
+	once := new(sync.Once)
+	dead := make(chan struct{})
+	link := func() (chan []byte, chan []byte) {
+		w, r := make(chan []byte, 1024), make(chan []byte, 1024)
+		go func() {
+			for b := range w {
+				wire.Add(int64(len(b)))
+				time.Sleep(delay)
+				select {
+				case r <- b:
+				case <-dead:
+					return
+				}
+			}
+		}()
+		return w, r
+	}
+	aw, br := link()
+	bw, ar := link()
+	return &memPath{in: ar, out: aw, once: once, dead: dead},
+		&memPath{in: br, out: bw, once: once, dead: dead}
+}
+
+// TestSidesPickingDifferentPathsConverge kills the active path when the two
+// sides list the remaining ones in a different order, so each fails over to a
+// different path. The follower must move to the leader's choice once, not
+// chase it.
+func TestSidesPickingDifferentPathsConverge(t *testing.T) {
+	leader := New(Config{})
+	follower := New(Config{FollowPeer: true})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var wire atomic.Int64
+	a1, a2 := slowPair(time.Millisecond, &wire)
+	b1, b2 := slowPair(time.Millisecond, &wire)
+	c1, c2 := slowPair(time.Millisecond, &wire)
+	leader.AddPath(a1)
+	leader.AddPath(b1)
+	leader.AddPath(c1)
+	follower.AddPath(a2)
+	follower.AddPath(c2)
+	follower.AddPath(b2)
+
+	const total = 16 << 20
+	errc := make(chan error, 1)
+	go pump(leader, make([]byte, total), errc)
+	var got []byte
+	readc := make(chan error, 1)
+	go readAll(follower, &got, readc)
+
+	time.Sleep(50 * time.Millisecond)
+	a1.Close()
+
+	select {
+	case err := <-readc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("transfer did not finish, %d MiB on the wire\n%s\n%s",
+			wire.Load()>>20, leader.debugState("leader"), follower.debugState("follower"))
+	}
+	if len(got) != total {
+		t.Fatalf("got %d bytes, want %d", len(got), total)
+	}
+	if w := wire.Load(); w > 2*total {
+		t.Errorf("%d MiB on the wire for %d MiB of data", w>>20, total>>20)
+	}
 }

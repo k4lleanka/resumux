@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -57,13 +58,39 @@ func (c ServerConfig) withDefaults() ServerConfig {
 	if c.Session.Linger <= 0 {
 		c.Session.Linger = c.ResumeTimeout
 	}
+	// The client picks the path; the server follows it.
+	c.Session.FollowPeer = true
 	return c
 }
 
 type serverSession struct {
 	secret string
 	s      *session.Session
+	// heard is set once the client has shown it holds the session: a frame
+	// on the first path, or a resumed path.
+	heard atomic.Bool
+	// joining counts paths being upgraded. Guarded by Server.mu.
+	joining int
 }
+
+// firstPath marks its session heard when the first frame arrives on it.
+type firstPath struct {
+	*wspath.Path
+	ss *serverSession
+}
+
+func (p firstPath) ReadFrame() ([]byte, error) {
+	b, err := p.Path.ReadFrame()
+	if err == nil {
+		p.ss.heard.Store(true)
+	}
+	return b, err
+}
+
+// defaultOrphanGrace is how long a session whose client was never heard from
+// waits for a path after its first one dies. A client that got the handshake
+// response dials again at once; one that did not never will.
+const defaultOrphanGrace = 10 * time.Second
 
 // Server accepts WebSocket paths and forwards each session to the target.
 type Server struct {
@@ -76,11 +103,20 @@ type Server struct {
 	// delivered, so a client resuming one learns it is done, not lost.
 	finished map[string]string
 	closed   bool
+
+	orphanGrace time.Duration // see defaultOrphanGrace
 }
 
 // ErrSessionExpired is the reason a session closes after ResumeTimeout
 // without a path.
 var ErrSessionExpired = errors.New("tunnel: no path within resume timeout")
+
+// errNeverJoined is the reason a session closes when its first path died
+// before the client could have learned the session id.
+var errNeverJoined = errors.New("tunnel: client never joined the session")
+
+// ErrServerClosed is the reason sessions end when the server is closed.
+var ErrServerClosed = errors.New("tunnel: server closed")
 
 // NewServer validates cfg and returns a Server. Serve it with net/http.
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -90,14 +126,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Target == "" {
 		return nil, errors.New("tunnel: server target is required")
 	}
+	cfg = cfg.withDefaults()
 	return &Server{
-		cfg: cfg.withDefaults(),
+		cfg: cfg,
 		upgrader: websocket.Upgrader{
 			// Clients are not browsers; the token is what authenticates them.
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
-		sessions: make(map[string]*serverSession),
-		finished: make(map[string]string),
+		sessions:    make(map[string]*serverSession),
+		finished:    make(map[string]string),
+		orphanGrace: min(defaultOrphanGrace, cfg.ResumeTimeout),
 	}, nil
 }
 
@@ -136,24 +174,39 @@ func (sv *Server) resume(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "session finished", http.StatusGone)
 		return
 	}
-	// Unknown session and wrong secret look the same, so neither reveals
-	// whether an id exists.
-	if !ok || !equalSecret(secret, ss.secret) {
+	// Unknown session and wrong secret look the same, in status and in time,
+	// so neither reveals whether an id exists.
+	known := ""
+	if ok {
+		known = ss.secret
+	}
+	if !equalSecret(secret, known) || !ok {
 		http.Error(w, "unknown session", http.StatusNotFound)
 		return
 	}
-	if ss.s.NumPaths() >= sv.cfg.MaxPathsPerSession {
+	// Upgrades still in progress count too, so concurrent ones cannot exceed
+	// the limit together.
+	sv.mu.Lock()
+	full := ss.s.NumPaths()+ss.joining >= sv.cfg.MaxPathsPerSession
+	if !full {
+		ss.joining++
+	}
+	sv.mu.Unlock()
+	if full {
 		http.Error(w, "too many paths", http.StatusTooManyRequests)
 		return
 	}
 	c, err := sv.upgrader.Upgrade(w, r, nil)
+	if err == nil {
+		err = ss.s.AddPath(wspath.New(c, sv.cfg.Path))
+	}
+	sv.mu.Lock()
+	ss.joining--
+	sv.mu.Unlock()
 	if err != nil {
 		return
 	}
-	if err := ss.s.AddPath(wspath.New(c, sv.cfg.Path)); err != nil {
-		c.Close()
-		return
-	}
+	ss.heard.Store(true)
 	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], r.RemoteAddr, ss.s.NumPaths())
 }
 
@@ -185,10 +238,12 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	s := session.New(sv.cfg.Session)
 	ss := &serverSession{secret: secret, s: s}
 	sv.mu.Lock()
-	if sv.closed {
+	// Checked again: the target dial above can take seconds, and other
+	// sessions may have been created meanwhile.
+	if sv.closed || len(sv.sessions) >= sv.cfg.MaxSessions {
 		sv.mu.Unlock()
 		target.Close()
-		http.Error(w, "server closing", http.StatusServiceUnavailable)
+		http.Error(w, "too many sessions", http.StatusServiceUnavailable)
 		return
 	}
 	sv.sessions[id] = ss
@@ -207,10 +262,12 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.AddPath(wspath.New(c, sv.cfg.Path))
+	first := wspath.New(c, sv.cfg.Path)
+	s.AddPath(firstPath{Path: first, ss: ss})
 	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], r.RemoteAddr)
 	start := time.Now()
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
+	go sv.dropIfOrphaned(ss, first)
 	go func() {
 		pipe(s, target)
 		sv.mu.Lock()
@@ -232,6 +289,29 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// dropIfOrphaned closes ss early when its first path dies before the client
+// was heard from. The handshake response was then most likely lost, and
+// keeping the session would hold a target connection for the whole resume
+// timeout.
+func (sv *Server) dropIfOrphaned(ss *serverSession, first *wspath.Path) {
+	select {
+	case <-first.Done():
+	case <-ss.s.Done():
+		return
+	}
+	if ss.heard.Load() {
+		return
+	}
+	select {
+	case <-time.After(sv.orphanGrace):
+	case <-ss.s.Done():
+		return
+	}
+	if !ss.heard.Load() {
+		ss.s.Abort(errNeverJoined)
+	}
+}
+
 // NumSessions reports how many sessions are open.
 func (sv *Server) NumSessions() int {
 	sv.mu.Lock()
@@ -249,7 +329,7 @@ func (sv *Server) Close() error {
 	}
 	sv.mu.Unlock()
 	for _, ss := range all {
-		ss.s.Abort(nil)
+		ss.s.Abort(ErrServerClosed)
 	}
 	return nil
 }
