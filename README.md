@@ -109,4 +109,4 @@ in order.
 
 ## License
 
-TBD
+Apache-2.0. See [LICENSE](LICENSE).
