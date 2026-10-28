@@ -603,3 +603,76 @@ func TestFollowerNeverLeavesQuietPath(t *testing.T) {
 		t.Fatal("follower dropped a quiet path")
 	}
 }
+
+// TestRepeatedSwitchesBackOff checks that a second switch soon after the
+// first waits for twice the interval, so a congested link cannot make the
+// session resend its window over and over.
+func TestRepeatedSwitchesBackOff(t *testing.T) {
+	const switchAfter = 100 * time.Millisecond
+	leader := New(Config{SwitchAfter: switchAfter})
+	defer leader.Abort(nil)
+	var mps [3]*memPath
+	var qps [3]*quietMemPath
+	for i := range mps {
+		mps[i], _ = memPair()
+		qps[i] = &quietMemPath{memPath: mps[i]}
+		leader.AddPath(qps[i])
+	}
+	waitClosed := func(p *memPath) time.Time {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !isClosed(p) {
+			if time.Now().After(deadline) {
+				t.Fatal("path was never dropped")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return time.Now()
+	}
+
+	qps[0].quiet.Store(int64(time.Hour))
+	qps[2].quiet.Store(int64(time.Hour))
+	first := waitClosed(mps[0])
+
+	// Now the path it moved to goes quiet, and the third becomes healthy.
+	qps[1].quiet.Store(int64(time.Hour))
+	qps[2].quiet.Store(0)
+	second := waitClosed(mps[1])
+	if gap := second.Sub(first); gap < 2*switchAfter-switchAfter/4 {
+		t.Fatalf("second switch %s after the first, want about %s", gap, 2*switchAfter)
+	}
+}
+
+// TestFailoverPicksHealthiestPath checks that when the active path fails,
+// the session moves to the path most recently heard from, not just the
+// oldest.
+func TestFailoverPicksHealthiestPath(t *testing.T) {
+	leader := New(Config{})
+	defer leader.Abort(nil)
+	var mps [3]*memPath
+	var qps [3]*quietMemPath
+	for i := range mps {
+		mps[i], _ = memPair()
+		qps[i] = &quietMemPath{memPath: mps[i]}
+		leader.AddPath(qps[i])
+	}
+	qps[1].quiet.Store(int64(time.Hour))
+	mps[0].Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		leader.mu.Lock()
+		active := leader.active
+		leader.mu.Unlock()
+		if active != nil && active.p == qps[2] {
+			return
+		}
+		if active != nil && active.p == qps[1] {
+			t.Fatal("failed over to a quiet path next to a healthy one")
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("did not fail over")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

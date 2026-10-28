@@ -145,12 +145,19 @@ included. CDNs and proxies close idle WebSockets, which the pings also
 prevent.
 
 The client does not wait that long when it has a choice. If the path it sends
-on has been silent for one and a half ping intervals while another path has
-not, it closes the silent path, switches, and sends everything
-unacknowledged again. It switches at most once per that interval. A path a
-proxy drops without closing is thus left in under two seconds. Only frames
-and pongs count as hearing from the peer, since they prove both directions
-work; a ping from the peer only proves one.
+on has been silent for a ping interval plus half an interval, or plus half a
+second if that is more, while another path has been heard from more
+recently, the client closes the silent path, switches, and sends everything
+unacknowledged again. A path a proxy drops without closing is thus normally
+left within two seconds. Only frames and pongs count as hearing from the
+peer, since they prove both directions work; a ping from the peer only
+proves one, and a path the peer has not been heard from on yet is never
+switched to.
+
+A congested link can delay pongs behind queued data, so every path may look
+silent in turn. Each switch therefore doubles the time before the next one
+is allowed, up to 30 seconds, until a path has stayed healthy that long.
+When a path fails, the client moves to the path it heard from most recently.
 
 A session with no path for the resume timeout (default 2 minutes) is closed on
 both sides. A session that is closing waits up to the same time for its

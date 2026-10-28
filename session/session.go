@@ -11,6 +11,7 @@ package session
 import (
 	"errors"
 	"io"
+	"math"
 	"sync"
 	"time"
 )
@@ -422,10 +423,8 @@ func (s *Session) pathFailed(ps *pathState) {
 	var next *pathState
 	if s.active == ps {
 		s.active = nil
-		if len(s.paths) > 0 {
-			s.active = s.paths[0]
-			next = s.active
-		}
+		s.active, _ = s.leastQuietLocked(nil)
+		next = s.active
 	}
 	s.mu.Unlock()
 
@@ -598,58 +597,89 @@ func (s *Session) Drained() bool {
 	return s.finRead && s.writeClosed && len(s.unacked) == 0
 }
 
+// maxSwitchGap bounds how far repeated switches push back the next one.
+const maxSwitchGap = 30 * time.Second
+
 // watchActive moves a leading session off a path that has gone quiet while
 // another has not, and drops the quiet one: a write blocked on it would
 // otherwise hold the writer until the path gave up by itself. If the path was
 // only slow, the cost is a redial and some harmless retransmission.
+//
+// A congested link can make every path look quiet in turn, since a ping waits
+// behind the data queued on its own path. Each switch therefore doubles the
+// time before the next one, and only a path that stays healthy for
+// maxSwitchGap resets it.
 func (s *Session) watchActive() {
 	t := time.NewTicker(s.cfg.SwitchAfter / 4)
 	defer t.Stop()
-	var last time.Time
+	gap := s.cfg.SwitchAfter
+	var last, healthySince time.Time
 	for {
 		select {
 		case <-s.done:
 			return
 		case <-t.C:
 		}
-		if old, next := s.leaveQuietPath(&last); next != nil {
+		old, next, quiet := s.leaveQuietPath(last, gap)
+		switch {
+		case next != nil:
 			go s.resync(next, true)
 			s.pathFailed(old)
+			last, healthySince = time.Now(), time.Time{}
+			gap = min(2*gap, maxSwitchGap)
+		case quiet:
+			healthySince = time.Time{}
+		case healthySince.IsZero():
+			healthySince = time.Now()
+		case time.Since(healthySince) >= maxSwitchGap:
+			gap = s.cfg.SwitchAfter
 		}
 	}
 }
 
 // leaveQuietPath makes the least quiet other path active if the active one
-// has been quiet for SwitchAfter, at most once per SwitchAfter so marginal
-// paths cannot make the session flap. It returns the old and the new path, or
-// nils if it did not switch.
-func (s *Session) leaveQuietPath(last *time.Time) (old, next *pathState) {
+// has been quiet for SwitchAfter and the last switch was at least gap ago. It
+// returns the old and the new path if it switched, and whether the active
+// path is quiet.
+func (s *Session) leaveQuietPath(last time.Time, gap time.Duration) (old, next *pathState, quiet bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.active == nil || time.Since(*last) < s.cfg.SwitchAfter {
-		return nil, nil
+	if s.closed || s.active == nil {
+		return nil, nil, false
 	}
 	q, ok := s.active.p.(QuietPath)
 	if !ok || q.Quiet() < s.cfg.SwitchAfter {
-		return nil, nil
+		return nil, nil, false
 	}
-	var best *pathState
-	bestQuiet := s.cfg.SwitchAfter
-	for _, ps := range s.paths {
-		if ps == s.active {
-			continue
-		}
-		if pq, ok := ps.p.(QuietPath); ok {
-			if d := pq.Quiet(); d < bestQuiet {
-				best, bestQuiet = ps, d
-			}
-		}
+	if time.Since(last) < gap {
+		return nil, nil, true
 	}
-	if best == nil {
-		return nil, nil
+	best, d := s.leastQuietLocked(s.active)
+	if best == nil || d >= s.cfg.SwitchAfter {
+		return nil, nil, true
 	}
 	old = s.active
 	s.active = best
-	*last = time.Now()
-	return old, best
+	return old, best, true
+}
+
+// leastQuietLocked returns the path, other than skip, that the peer was most
+// recently heard from on, and how long ago that was. Among paths that cannot
+// tell, it prefers the oldest.
+func (s *Session) leastQuietLocked(skip *pathState) (*pathState, time.Duration) {
+	var best *pathState
+	bestQuiet := time.Duration(math.MaxInt64)
+	for _, ps := range s.paths {
+		if ps == skip {
+			continue
+		}
+		d := time.Duration(math.MaxInt64)
+		if q, ok := ps.p.(QuietPath); ok {
+			d = q.Quiet()
+		}
+		if best == nil || d < bestQuiet {
+			best, bestQuiet = ps, d
+		}
+	}
+	return best, bestQuiet
 }

@@ -3,6 +3,7 @@ package wspath
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,8 +52,9 @@ type Path struct {
 	wmu       sync.Mutex
 	closeOnce sync.Once
 	done      chan struct{}
-	// heard is when the last frame or pong arrived, measured from start on
-	// the monotonic clock so wall-clock jumps cannot fake silence.
+	// heard is when the last frame or pong arrived, plus one, measured from
+	// start on the monotonic clock so wall-clock jumps cannot fake silence.
+	// Zero means the peer has not been heard from yet.
 	start time.Time
 	heard atomic.Int64
 }
@@ -61,7 +63,7 @@ type Path struct {
 func New(c *websocket.Conn, opts Options) *Path {
 	p := &Path{c: c, opts: opts.withDefaults(), done: make(chan struct{}), start: time.Now()}
 	c.SetReadLimit(p.opts.MaxFrameSize)
-	p.markHeard()
+	c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
 	c.SetPongHandler(func(string) error {
 		return p.markHeard()
 	})
@@ -107,13 +109,19 @@ func (p *Path) ReadFrame() ([]byte, error) {
 // counts, since it proves both directions work; a ping from the peer does
 // not, since it only proves one.
 func (p *Path) markHeard() error {
-	p.heard.Store(int64(time.Since(p.start)))
+	p.heard.Store(int64(time.Since(p.start)) + 1)
 	return p.c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
 }
 
-// Quiet reports how long ago the peer was last heard from on this path.
+// Quiet reports how long ago the peer was last heard from on this path. A
+// path the peer has not been heard from on yet has not shown that it works,
+// so it reports the longest possible time.
 func (p *Path) Quiet() time.Duration {
-	return time.Since(p.start) - time.Duration(p.heard.Load())
+	h := p.heard.Load()
+	if h == 0 {
+		return math.MaxInt64
+	}
+	return time.Since(p.start) - time.Duration(h-1)
 }
 
 // WriteFrame sends b as one binary message.
