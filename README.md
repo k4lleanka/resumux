@@ -62,6 +62,25 @@ resumux client -config client.json
 
 Run `resumux server -h` and `resumux client -h` for all flags.
 
+## Try it on a flaky link
+
+`examples/flakyproxy` forwards TCP and cuts every connection at a fixed
+interval. Put it between the client and the server and keep a connection open
+through the tunnel, for example SSH:
+
+```sh
+go build ./cmd/resumux && go build ./examples/flakyproxy
+resumux server -listen 127.0.0.1:8080 -target 127.0.0.1:22 -token-file token
+flakyproxy -listen 127.0.0.1:9000 -upstream 127.0.0.1:8080 -cut-every 3s
+resumux client -listen 127.0.0.1:2222 -server ws://127.0.0.1:9000/ -token-file token
+ssh -p 2222 user@127.0.0.1
+```
+
+flakyproxy logs `cut 4 connections` every three seconds, which takes down
+every path of the session at once, and the SSH session carries on. Put
+flakyproxy straight in front of port 22 instead, without resumux, and SSH drops
+at the first cut.
+
 ## Security
 
 - Every connection to the server must present the shared token
