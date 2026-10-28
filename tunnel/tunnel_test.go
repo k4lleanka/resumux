@@ -626,3 +626,117 @@ func TestResumeFinishedSession(t *testing.T) {
 		t.Errorf("wrong secret: got %d, want 404", got)
 	}
 }
+
+// freezeConn can go silent without closing, like a path whose packets stop
+// arriving: reads block and writes vanish until it is closed.
+type freezeConn struct {
+	net.Conn
+	frozen    atomic.Bool
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *freezeConn) Read(b []byte) (int, error) {
+	for {
+		if c.frozen.Load() {
+			<-c.closed
+			return 0, net.ErrClosed
+		}
+		n, err := c.Conn.Read(b)
+		if !c.frozen.Load() || err != nil {
+			return n, err
+		}
+	}
+}
+
+func (c *freezeConn) Write(b []byte) (int, error) {
+	if c.frozen.Load() {
+		return len(b), nil
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *freezeConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// freezingListener wraps every accepted connection so a test can freeze it.
+type freezingListener struct {
+	net.Listener
+	mu    sync.Mutex
+	conns []*freezeConn
+}
+
+func (l *freezingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	fc := &freezeConn{Conn: c, closed: make(chan struct{})}
+	l.mu.Lock()
+	l.conns = append(l.conns, fc)
+	l.mu.Unlock()
+	return fc, nil
+}
+
+// TestSilentPathFailsOverQuickly freezes the path the client sends on while a
+// second path is healthy. The session must move to the healthy path within a
+// few seconds, not wait for a long keepalive timeout.
+func TestSilentPathFailsOverQuickly(t *testing.T) {
+	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: testLogger(t, "server: ")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewUnstartedServer(sv)
+	fl := &freezingListener{Listener: hs.Listener}
+	hs.Listener = fl
+	hs.Start()
+	t.Cleanup(func() {
+		sv.Close()
+		hs.Close()
+	})
+	addr := startClient(t, ClientConfig{ServerURL: "ws" + strings.TrimPrefix(hs.URL, "http")})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(60 * time.Second))
+	echo := func(msg string) {
+		t.Helper()
+		if _, err := c.Write([]byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(msg))
+		if _, err := io.ReadFull(c, got); err != nil || string(got) != msg {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	}
+	echo("before")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fl.mu.Lock()
+		n := len(fl.conns)
+		fl.mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second path never connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fl.mu.Lock()
+	fl.conns[0].frozen.Store(true)
+	fl.mu.Unlock()
+	start := time.Now()
+	echo("after")
+	if d := time.Since(start); d > 8*time.Second {
+		t.Fatalf("took %s to move off a silent path", d.Round(time.Millisecond))
+	} else {
+		t.Logf("moved off the silent path in %s", d.Round(time.Millisecond))
+	}
+}

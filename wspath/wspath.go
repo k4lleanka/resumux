@@ -25,10 +25,13 @@ type Options struct {
 
 func (o Options) withDefaults() Options {
 	if o.PingInterval <= 0 {
-		o.PingInterval = 10 * time.Second
+		o.PingInterval = time.Second
 	}
+	// Long enough for one full-size frame on a slow link, since only a
+	// complete message counts as received, and short enough that a session
+	// leaves a silent path within seconds.
 	if o.DeadAfter <= 0 {
-		o.DeadAfter = 3 * o.PingInterval
+		o.DeadAfter = 5 * o.PingInterval
 	}
 	if o.WriteTimeout <= 0 {
 		o.WriteTimeout = 10 * time.Second

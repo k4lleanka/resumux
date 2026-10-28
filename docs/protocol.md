@@ -139,9 +139,11 @@ so many tiny frames cannot use more memory than the window suggests.
 
 ## Liveness
 
-Each side sends a WebSocket ping every 10 seconds by default, and treats a
-path as dead after 30 seconds without receiving anything. CDNs and proxies
-close idle WebSockets, and pings also keep them open.
+Each side sends a WebSocket ping every second by default, and treats a path
+as dead after 5 seconds without receiving a complete message, pongs
+included. A path that goes silent, as when a proxy drops it without closing
+it, is therefore left within seconds. CDNs and proxies also close idle
+WebSockets, which the pings prevent.
 
 A session with no path for the resume timeout (default 2 minutes) is closed on
 both sides. A session that is closing waits up to the same time for its

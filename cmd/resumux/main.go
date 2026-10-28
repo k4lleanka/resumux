@@ -28,6 +28,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/k4lleanka/resumux/tunnel"
+	"github.com/k4lleanka/resumux/wspath"
 )
 
 // version is set at build time with -ldflags "-X main.version=v1.0.0".
@@ -144,12 +145,16 @@ func runServer(args []string) error {
 	maxSessions := fs.Int("max-sessions", 1024, "maximum concurrent sessions")
 	maxPaths := fs.Int("max-paths", 8, "maximum paths per session")
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long a session without paths is kept")
+	deadAfter := fs.Duration("dead-after", 5*time.Second, "how long a path may stay silent before it is dropped")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
 	}
 	if *target == "" {
 		return errors.New("-target is required")
+	}
+	if *deadAfter < time.Second {
+		return errors.New("-dead-after must be at least 1s")
 	}
 	if !strings.HasPrefix(*path, "/") {
 		return fmt.Errorf("-path must start with /, got %q", *path)
@@ -168,6 +173,7 @@ func runServer(args []string) error {
 		MaxSessions:        *maxSessions,
 		MaxPathsPerSession: *maxPaths,
 		ResumeTimeout:      *resume,
+		Path:               pathOptions(*deadAfter),
 	})
 	if err != nil {
 		return err
@@ -213,12 +219,16 @@ func runClient(args []string) error {
 	host := fs.String("host", "", "Host header to send, if it differs from the server URL")
 	caFile := fs.String("ca-file", "", "PEM file with CA certificates to trust instead of the system ones")
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long to keep trying to resume a session")
+	deadAfter := fs.Duration("dead-after", 5*time.Second, "how long a path may stay silent before the session moves off it")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
 	}
 	if *listen == "" || *server == "" {
 		return errors.New("-listen and -server are required")
+	}
+	if *deadAfter < time.Second {
+		return errors.New("-dead-after must be at least 1s")
 	}
 	token, err := readToken(*tokenFile)
 	if err != nil {
@@ -238,6 +248,7 @@ func runClient(args []string) error {
 		Token:         token,
 		Paths:         *paths,
 		ResumeTimeout: *resume,
+		Path:          pathOptions(*deadAfter),
 		Header:        header,
 		Dialer:        dialer,
 	})
@@ -281,4 +292,10 @@ func wsDialer(caFile string) (*websocket.Dialer, error) {
 	}
 	d.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	return &d, nil
+}
+
+// pathOptions pings five times per dead-after interval, so a few lost pings
+// alone never drop a healthy path.
+func pathOptions(deadAfter time.Duration) wspath.Options {
+	return wspath.Options{PingInterval: deadAfter / 5, DeadAfter: deadAfter}
 }
