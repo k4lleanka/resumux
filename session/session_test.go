@@ -273,3 +273,131 @@ func (s *Session) debugState(name string) string {
 		name, s.nextSeq, len(s.unacked), first, s.unackedBytes, s.writeClosed,
 		s.expected, len(s.pending), minPending, len(s.readQ), s.consumed, len(s.paths), s.active != nil)
 }
+
+// hostilePeer attaches one end of a path to s and returns the other end for
+// the test to write raw frames into.
+func hostilePeer(t *testing.T, s *Session) *memPath {
+	t.Helper()
+	ours, theirs := memPair()
+	if err := s.AddPath(ours); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			if _, err := theirs.ReadFrame(); err != nil {
+				return
+			}
+		}
+	}()
+	return theirs
+}
+
+func waitAborted(t *testing.T, s *Session, want error) {
+	t.Helper()
+	select {
+	case <-s.Done():
+		if !errors.Is(s.Err(), want) {
+			t.Fatalf("session closed with %v, want %v", s.Err(), want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("session was not aborted")
+	}
+}
+
+// A peer that ignores flow control and keeps sending must not make the
+// receiver buffer without limit.
+func TestPeerIgnoringWindowIsAborted(t *testing.T) {
+	s := New(Config{RecvWindow: 1 << 20})
+	defer s.Abort(nil)
+	peer := hostilePeer(t, s)
+
+	payload := make([]byte, 32<<10)
+	for seq := uint64(0); seq < 1000; seq++ {
+		if err := peer.WriteFrame(encodeFrame(frameData, seq, payload)); err != nil {
+			break
+		}
+	}
+	waitAborted(t, s, ErrPeerOverrun)
+}
+
+// Many tiny frames are counted with their overhead, so they cannot slip
+// under a window meant for bytes.
+func TestTinyFramesCountAgainstWindow(t *testing.T) {
+	s := New(Config{RecvWindow: 64 << 10})
+	defer s.Abort(nil)
+	peer := hostilePeer(t, s)
+
+	for seq := uint64(0); seq < 100000; seq++ {
+		if err := peer.WriteFrame(encodeFrame(frameData, seq, []byte{1})); err != nil {
+			break
+		}
+	}
+	waitAborted(t, s, ErrPeerOverrun)
+}
+
+// A frame far beyond anything a well-behaved sender could have in flight is
+// rejected instead of being parked in the reorder buffer.
+func TestFrameFarAheadIsAborted(t *testing.T) {
+	s := New(Config{})
+	defer s.Abort(nil)
+	peer := hostilePeer(t, s)
+
+	peer.WriteFrame(encodeFrame(frameData, 1<<40, []byte("x")))
+	waitAborted(t, s, ErrPeerOverrun)
+}
+
+func FuzzDecodeFrame(f *testing.F) {
+	f.Add(encodeFrame(frameData, 7, []byte("hello")))
+	f.Add(encodeFrame(frameFin, 1, nil))
+	f.Add(encodeFrame(frameAck, 3, nil))
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		fr, err := decodeFrame(b)
+		if err != nil {
+			return
+		}
+		if got := encodeFrame(fr.kind, fr.seq, fr.payload); !bytes.Equal(got, b) {
+			t.Fatalf("decode then encode changed the frame: %x -> %x", b, got)
+		}
+	})
+}
+
+// FuzzSessionInput feeds arbitrary frames to a session. Whatever arrives, it
+// must not panic or deadlock; misbehaviour may only close the session.
+func FuzzSessionInput(f *testing.F) {
+	f.Add(encodeFrame(frameData, 0, []byte("a")), encodeFrame(frameAck, 5, nil))
+	f.Add(encodeFrame(frameFin, 0, nil), []byte{0xff})
+	f.Fuzz(func(t *testing.T, a, b []byte) {
+		s := New(Config{RecvWindow: 1 << 16})
+		defer s.Abort(nil)
+		ours, theirs := memPair()
+		s.AddPath(ours)
+		go func() {
+			for {
+				if _, err := theirs.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+		theirs.WriteFrame(a)
+		theirs.WriteFrame(b)
+		theirs.Close()
+
+		done := make(chan struct{})
+		go func() {
+			buf := make([]byte, 1024)
+			s.mu.Lock()
+			n := len(s.readQ)
+			s.mu.Unlock()
+			for range n {
+				s.Read(buf)
+			}
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("session stuck")
+		}
+	})
+}

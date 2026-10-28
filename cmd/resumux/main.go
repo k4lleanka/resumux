@@ -25,6 +25,9 @@ import (
 	"github.com/k4lleanka/resumux/tunnel"
 )
 
+// version is set at build time with -ldflags "-X main.version=v1.0.0".
+var version = "dev"
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("resumux: ")
@@ -39,6 +42,9 @@ func main() {
 		err = runServer(os.Args[2:])
 	case "client":
 		err = runClient(os.Args[2:])
+	case "version", "-version", "--version":
+		fmt.Println("resumux", version)
+		return
 	case "-h", "-help", "--help", "help":
 		usage()
 		return
@@ -55,6 +61,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   resumux server [flags]   accept tunnels and forward them to a target
   resumux client [flags]   forward local connections through a server
+  resumux version          print the version
 
 Run "resumux server -h" or "resumux client -h" for flags.`)
 }

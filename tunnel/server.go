@@ -137,7 +137,9 @@ func (sv *Server) resume(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if err := ss.s.AddPath(wspath.New(c, sv.cfg.Path)); err != nil {
 		c.Close()
+		return
 	}
+	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], r.RemoteAddr, ss.s.NumPaths())
 }
 
 func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +153,7 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 
 	target, err := net.DialTimeout("tcp", sv.cfg.Target, sv.cfg.DialTimeout)
 	if err != nil {
-		sv.cfg.Logger.Printf("resumux: dial target: %v", err)
+		sv.cfg.Logger.Printf("dial target: %v", err)
 		http.Error(w, "target unavailable", http.StatusBadGateway)
 		return
 	}
@@ -191,12 +193,19 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.AddPath(wspath.New(c, sv.cfg.Path))
+	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], r.RemoteAddr)
+	start := time.Now()
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
 	go func() {
 		pipe(s, target)
 		sv.mu.Lock()
 		delete(sv.sessions, id)
 		sv.mu.Unlock()
+		reason := "closed"
+		if err := s.Err(); err != nil {
+			reason = err.Error()
+		}
+		sv.cfg.Logger.Printf("session %s: %s after %s", id[:8], reason, time.Since(start).Round(time.Second))
 	}()
 }
 

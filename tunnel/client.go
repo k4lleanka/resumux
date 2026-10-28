@@ -126,10 +126,11 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 		id:     resp.Header.Get(headerSession),
 		secret: resp.Header.Get(headerSecret),
 	}
-	if auth.id == "" || auth.secret == "" {
+	if len(auth.id) < 8 || auth.secret == "" {
 		first.Close()
-		return errors.New("tunnel: server did not issue a session")
+		return errors.New("tunnel: server did not issue a valid session")
 	}
+	cl.cfg.Logger.Printf("session %s: opened for %s", auth.id[:8], local.RemoteAddr())
 
 	s := session.New(cl.cfg.Session)
 	firstPath := wspath.New(first, cl.cfg.Path)
@@ -141,9 +142,12 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 		go cl.keepPath(s, auth, nil)
 	}
 
-	pipe(s, local)
-	if err := s.Err(); err != nil {
-		return err
+	// A stream that ended cleanly is not an error, even if a path redial then
+	// found the session already gone on the server.
+	if err := pipe(s, local); err != nil {
+		if serr := s.Err(); serr != nil {
+			return serr
+		}
 	}
 	return nil
 }
@@ -210,5 +214,6 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, p *wspath.Path
 		if err := s.AddPath(p); err != nil {
 			return
 		}
+		cl.cfg.Logger.Printf("session %s: path connected, %d open", auth.id[:8], s.NumPaths())
 	}
 }

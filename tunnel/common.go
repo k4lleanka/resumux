@@ -8,6 +8,7 @@ package tunnel
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"io"
@@ -35,19 +36,24 @@ func randomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// equalSecret compares in constant time. Hashing first keeps the time
+// independent of the lengths, too.
 func equalSecret(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	ha, hb := sha256.Sum256([]byte(a)), sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 // pipe copies between a session and a TCP connection until both directions
-// are finished, then closes both.
-func pipe(s *session.Session, c net.Conn) {
+// are finished, then closes both. It returns the error that cut the stream
+// from the session short, or nil if the peer closed it cleanly.
+func pipe(s *session.Session, c net.Conn) error {
 	go func() {
 		<-s.Done()
 		c.Close()
 	}()
 
 	var wg sync.WaitGroup
+	var recvErr error
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -56,7 +62,7 @@ func pipe(s *session.Session, c net.Conn) {
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(c, s)
+		_, recvErr = io.Copy(c, s)
 		if cw, ok := c.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
 		} else {
@@ -66,6 +72,7 @@ func pipe(s *session.Session, c net.Conn) {
 	wg.Wait()
 	s.Close()
 	c.Close()
+	return recvErr
 }
 
 // expireWithoutPaths aborts s once it has had no path for longer than timeout.

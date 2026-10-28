@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"log"
 	mrand "math/rand/v2"
@@ -263,6 +264,7 @@ func TestSessionExpiresWithoutPaths(t *testing.T) {
 		t.Fatalf("got %d sessions, want 1", n)
 	}
 	c.Close()
+	c.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for h.server.NumSessions() != 0 {
@@ -296,4 +298,115 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(b []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(b)))
 	return len(b), nil
+}
+
+func TestManyConnectionsWhilePathsAreCut(t *testing.T) {
+	h := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURL: h.url})
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Duration(10+mrand.IntN(30)) * time.Millisecond):
+				h.listener.cutOne()
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			want := randomData(t, 256<<10)
+			if got := roundTrip(t, addr, want); !bytes.Equal(got, want) {
+				t.Errorf("got %d bytes back, want %d, or contents differ", len(got), len(want))
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// listenTarget runs handle for every connection to a new TCP listener.
+func listenTarget(t *testing.T, handle func(*net.TCPConn)) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go handle(c.(*net.TCPConn))
+		}
+	}()
+	return l.Addr().String()
+}
+
+// TestHalfClose checks that closing the client's write side reaches the
+// target as EOF while the reply can still flow back.
+func TestHalfClose(t *testing.T) {
+	target := listenTarget(t, func(c *net.TCPConn) {
+		defer c.Close()
+		b, _ := io.ReadAll(c)
+		fmt.Fprintf(c, "got %d bytes", len(b))
+	})
+	h := startServer(t, ServerConfig{Target: target})
+	addr := startClient(t, ClientConfig{ServerURL: h.url})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	c.Write(make([]byte, 12345))
+	c.(*net.TCPConn).CloseWrite()
+	reply, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(reply) != "got 12345 bytes" {
+		t.Fatalf("reply %q", reply)
+	}
+}
+
+// TestTargetClosesFirst checks that a target hanging up reaches the client as
+// EOF, and that the session is freed once the client closes too. Until then
+// the client may still be sending, exactly as with a direct TCP connection.
+func TestTargetClosesFirst(t *testing.T) {
+	target := listenTarget(t, func(c *net.TCPConn) {
+		c.Write([]byte("bye"))
+		c.Close()
+	})
+	h := startServer(t, ServerConfig{Target: target})
+	addr := startClient(t, ClientConfig{ServerURL: h.url})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil || string(got) != "bye" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	c.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for h.server.NumSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("session still open after both ends closed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

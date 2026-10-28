@@ -28,9 +28,13 @@ type Path interface {
 type Config struct {
 	// MaxFrameSize is the largest payload put in one frame.
 	MaxFrameSize int
-	// SendWindow is how many payload bytes may be unacknowledged before
-	// Write blocks. It bounds memory on both sides.
+	// SendWindow is how much may be unacknowledged before Write blocks,
+	// counting each frame as its payload plus frameCost.
 	SendWindow int
+	// RecvWindow is how much received data may be buffered before the peer is
+	// considered misbehaving and the session is aborted, counted the same
+	// way. It must be at least the peer's SendWindow.
+	RecvWindow int
 	// AckDelay is how long the receiver waits to batch acknowledgements.
 	AckDelay time.Duration
 	// Linger is how long Close waits for the peer to acknowledge outstanding
@@ -44,6 +48,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SendWindow <= 0 {
 		c.SendWindow = 4 << 20
+	}
+	if c.RecvWindow <= 0 {
+		c.RecvWindow = 8 << 20
 	}
 	if c.AckDelay <= 0 {
 		c.AckDelay = 10 * time.Millisecond
@@ -59,7 +66,15 @@ var (
 	ErrClosed = errors.New("session: closed")
 	// ErrWriteClosed is returned by Write after CloseWrite.
 	ErrWriteClosed = errors.New("session: write side closed")
+	// ErrPeerOverrun means the peer sent more than the receive window allows.
+	ErrPeerOverrun = errors.New("session: peer exceeded the receive window")
 )
+
+// frameCost is added to every frame's payload when windows are counted, so
+// that many tiny frames cannot use more memory than the window suggests.
+const frameCost = 64
+
+func cost(payload []byte) int { return len(payload) + frameCost }
 
 type sentFrame struct {
 	seq     uint64
@@ -94,6 +109,7 @@ type Session struct {
 
 	expected uint64
 	pending  map[uint64]frame
+	buffered int // cost of everything in pending and readQ
 	readQ    []recvItem
 	readOff  int
 	consumed uint64
@@ -172,7 +188,7 @@ func (s *Session) Write(b []byte) (int, error) {
 
 		s.mu.Lock()
 		for !s.closed && !s.writeClosed && s.unackedBytes > 0 &&
-			s.unackedBytes+len(chunk) > s.cfg.SendWindow {
+			s.unackedBytes+cost(chunk) > s.cfg.SendWindow {
 			s.writeCond.Wait()
 		}
 		if s.closed {
@@ -202,7 +218,7 @@ func (s *Session) enqueueLocked(kind byte, payload []byte) []byte {
 	seq := s.nextSeq
 	s.nextSeq++
 	s.unacked = append(s.unacked, sentFrame{seq: seq, kind: kind, payload: payload})
-	s.unackedBytes += len(payload)
+	s.unackedBytes += cost(payload)
 	return encodeFrame(kind, seq, payload)
 }
 
@@ -227,6 +243,7 @@ func (s *Session) Read(b []byte) (int, error) {
 	if s.readOff == len(it.data) {
 		s.readQ = s.readQ[1:]
 		s.readOff = 0
+		s.buffered -= cost(it.data)
 		s.markConsumedLocked(it.seq)
 	}
 	return n, nil
@@ -412,13 +429,19 @@ func (s *Session) handle(ps *pathState, f frame) {
 		switched = true
 	}
 
+	var err error
 	switch f.kind {
 	case frameAck:
 		s.ackLocked(f.seq)
 	case frameData, frameFin:
-		s.receiveLocked(f)
+		err = s.receiveLocked(f)
 	}
 	s.mu.Unlock()
+
+	if err != nil {
+		s.Abort(err)
+		return
+	}
 
 	// Never write from the read loop: if both sides did, each could block on a
 	// full path while the other is not reading, and neither would recover.
@@ -430,7 +453,7 @@ func (s *Session) handle(ps *pathState, f frame) {
 func (s *Session) ackLocked(next uint64) {
 	i := 0
 	for i < len(s.unacked) && s.unacked[i].seq < next {
-		s.unackedBytes -= len(s.unacked[i].payload)
+		s.unackedBytes -= cost(s.unacked[i].payload)
 		i++
 	}
 	if i > 0 {
@@ -439,18 +462,28 @@ func (s *Session) ackLocked(next uint64) {
 	}
 }
 
-func (s *Session) receiveLocked(f frame) {
-	switch {
-	case f.seq < s.expected:
+// receiveLocked accepts a DATA or FIN frame. It returns ErrPeerOverrun if
+// keeping the frame would exceed the receive window, which a peer that
+// respects its send window never causes.
+func (s *Session) receiveLocked(f frame) error {
+	if f.seq < s.expected {
 		// Already have it; the peer missed our acknowledgement.
 		s.scheduleAckLocked()
-		return
-	case f.seq > s.expected:
-		if _, ok := s.pending[f.seq]; !ok {
-			f.payload = append([]byte(nil), f.payload...)
-			s.pending[f.seq] = f
-		}
-		return
+		return nil
+	}
+	if _, ok := s.pending[f.seq]; ok {
+		return nil
+	}
+	maxAhead := uint64(s.cfg.RecvWindow / frameCost)
+	if f.seq-s.expected > maxAhead || s.buffered+cost(f.payload) > s.cfg.RecvWindow {
+		return ErrPeerOverrun
+	}
+	s.buffered += cost(f.payload)
+
+	if f.seq > s.expected {
+		f.payload = append([]byte(nil), f.payload...)
+		s.pending[f.seq] = f
+		return nil
 	}
 
 	s.deliverLocked(f)
@@ -463,6 +496,7 @@ func (s *Session) receiveLocked(f frame) {
 		s.deliverLocked(next)
 	}
 	s.readCond.Broadcast()
+	return nil
 }
 
 func (s *Session) deliverLocked(f frame) {
@@ -472,6 +506,7 @@ func (s *Session) deliverLocked(f frame) {
 		return
 	}
 	if len(f.payload) == 0 {
+		s.buffered -= cost(nil)
 		s.markConsumedLocked(f.seq)
 		return
 	}
