@@ -32,8 +32,8 @@ WebSocket paths at once.
 - When a path dies, the client dials a new one, and everything not yet
   acknowledged is sent again.
 - A path that goes silent without closing, as when a proxy drops it, is
-  normally left within two seconds if another path is healthy, and counts as
-  dead after 5 seconds otherwise (`-dead-after`). Idle paths are pinged
+  left in about two seconds if another path is healthy, and counts as dead
+  after 5 seconds otherwise (`-dead-after`). Idle paths are pinged
   every second to keep both checks honest; busy ones are not, so pings never
   compete with traffic.
 
@@ -143,10 +143,15 @@ resumux client -listen 127.0.0.1:2222 -server ws://127.0.0.1:9000/ -token-file t
 ssh -p 2222 user@127.0.0.1
 ```
 
-Every three seconds flakyproxy logs `cut 4 connections`, which takes down both
+Every three seconds flakyproxy logs `cut 2 connections`, which takes down both
 paths of the session at once, and the SSH session carries on. Put flakyproxy
 straight in front of port 22 instead, without resumux, and SSH drops at the
 first cut.
+
+With `-freeze`, flakyproxy instead silences its oldest connection each time,
+dropping data both ways without closing it, like a proxy that loses a path
+without telling anyone. The session then moves to its other path in about
+two seconds.
 
 [examples/sshdemo](examples/sshdemo) runs the whole comparison in one Docker
 container with a real OpenSSH server.

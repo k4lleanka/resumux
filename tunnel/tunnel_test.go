@@ -703,6 +703,9 @@ func TestSilentPathFailsOverQuickly(t *testing.T) {
 		}
 	}
 	echo("before")
+	// Let the paths settle into their idle keepalive rhythm first; a fresh
+	// spare has just been heard from and would hide a slow ping cadence.
+	time.Sleep(4 * time.Second)
 	fl.freezeFirst(t)
 	start := time.Now()
 	echo("after")
@@ -1004,4 +1007,31 @@ func TestStray410DoesNotFinishSession(t *testing.T) {
 	h.blocked.Store(false)
 
 	echoOn(t, c, "after")
+}
+
+// TestIdleSessionKeepsItsPaths checks that an idle session does not take its
+// own healthy paths for silent ones: between keepalives an idle path is
+// quiet by design, and dropping it would only cause needless redials.
+func TestIdleSessionKeepsItsPaths(t *testing.T) {
+	h := startServer(t, ServerConfig{})
+	var accepted atomic.Int32
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accepted.Add(1)
+		h.server.ServeHTTP(w, r)
+	}))
+	t.Cleanup(counting.Close)
+	addr := startClient(t, ClientConfig{ServerURLs: []string{"ws" + strings.TrimPrefix(counting.URL, "http")}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(20 * time.Second))
+	echoOn(t, c, "hello")
+	time.Sleep(6 * time.Second)
+	echoOn(t, c, "still here")
+	if n := accepted.Load(); n != 2 {
+		t.Fatalf("an idle session with 2 paths made %d handshakes, want 2", n)
+	}
 }

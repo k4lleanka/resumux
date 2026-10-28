@@ -604,12 +604,32 @@ func TestFollowerNeverLeavesQuietPath(t *testing.T) {
 	}
 }
 
-// TestRepeatedSwitchesBackOff checks that a second switch soon after the
-// first waits for twice the interval, so a congested link cannot make the
-// session resend its window over and over.
+// TestRepeatedSwitchesBackOff checks that, with much of the window in
+// flight, a second switch soon after the first waits for twice the interval,
+// so a congested link cannot make the session resend its window over and
+// over.
 func TestRepeatedSwitchesBackOff(t *testing.T) {
-	const switchAfter = 100 * time.Millisecond
-	leader := New(Config{SwitchAfter: switchAfter})
+	if gap := secondSwitchGap(t, 32<<10); gap < 2*testSwitchAfter-testSwitchAfter/4 {
+		t.Fatalf("second switch %s after the first, want about %s", gap, 2*testSwitchAfter)
+	}
+}
+
+// TestInteractiveSwitchesAreNotDelayed checks the other side: with little
+// in flight, silence means a dead path, so a second switch must not wait.
+func TestInteractiveSwitchesAreNotDelayed(t *testing.T) {
+	if gap := secondSwitchGap(t, 0); gap >= 2*testSwitchAfter-testSwitchAfter/4 {
+		t.Fatalf("second switch %s after the first, want about %s", gap, testSwitchAfter)
+	}
+}
+
+const testSwitchAfter = 100 * time.Millisecond
+
+// secondSwitchGap makes a leader switch twice, with inFlight bytes written
+// and never acknowledged, and returns the time between the two switches.
+func secondSwitchGap(t *testing.T, inFlight int) time.Duration {
+	t.Helper()
+	const switchAfter = testSwitchAfter
+	leader := New(Config{SwitchAfter: switchAfter, SendWindow: 64 << 10, MaxFrameSize: 4 << 10})
 	defer leader.Abort(nil)
 	var mps [3]*memPath
 	var qps [3]*quietMemPath
@@ -617,6 +637,11 @@ func TestRepeatedSwitchesBackOff(t *testing.T) {
 		mps[i], _ = memPair()
 		qps[i] = &quietMemPath{memPath: mps[i]}
 		leader.AddPath(qps[i])
+	}
+	if inFlight > 0 {
+		if _, err := leader.Write(make([]byte, inFlight)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	waitClosed := func(p *memPath) time.Time {
 		t.Helper()
@@ -638,9 +663,7 @@ func TestRepeatedSwitchesBackOff(t *testing.T) {
 	qps[1].quiet.Store(int64(time.Hour))
 	qps[2].quiet.Store(0)
 	second := waitClosed(mps[1])
-	if gap := second.Sub(first); gap < 2*switchAfter-switchAfter/4 {
-		t.Fatalf("second switch %s after the first, want about %s", gap, 2*switchAfter)
-	}
+	return second.Sub(first)
 }
 
 // TestFailoverPicksHealthiestPath checks that when the active path fails,

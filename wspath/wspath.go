@@ -74,8 +74,12 @@ func New(c *websocket.Conn, opts Options) *Path {
 }
 
 func (p *Path) keepalive() {
-	t := time.NewTicker(p.opts.PingInterval)
+	// Checking four times per interval keeps an idle path pinged close to
+	// every interval; checking once would let up to two pass between pings,
+	// which makes a healthy idle path look silent.
+	t := time.NewTicker(p.opts.PingInterval / 4)
 	defer t.Stop()
+	var lastPing time.Time
 	for {
 		select {
 		case <-p.done:
@@ -83,8 +87,9 @@ func (p *Path) keepalive() {
 		case <-t.C:
 		}
 		// A path that is delivering frames needs no proof that it works, and a
-		// ping would only compete with them for the connection.
-		if p.halfClosed.Load() || p.Quiet() < p.opts.PingInterval {
+		// ping would only compete with them for the connection. One ping per
+		// interval is enough while the answer is on its way.
+		if p.halfClosed.Load() || p.Quiet() < p.opts.PingInterval || time.Since(lastPing) < p.opts.PingInterval {
 			continue
 		}
 		p.wmu.Lock()
@@ -94,6 +99,7 @@ func (p *Path) keepalive() {
 			p.Close()
 			return
 		}
+		lastPing = time.Now()
 	}
 }
 

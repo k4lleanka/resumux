@@ -77,7 +77,7 @@ func (c Config) withDefaults() Config {
 		c.Linger = 5 * time.Second
 	}
 	if c.SwitchAfter <= 0 {
-		c.SwitchAfter = 1500 * time.Millisecond
+		c.SwitchAfter = 2 * time.Second
 	}
 	return c
 }
@@ -607,9 +607,11 @@ const maxSwitchGap = 30 * time.Second
 // only slow, the cost is a redial and some harmless retransmission.
 //
 // A congested link can make every path look quiet in turn, since a ping waits
-// behind the data queued on its own path. Each switch therefore doubles the
-// time before the next one, and only a path that stays healthy for
-// maxSwitchGap resets it.
+// behind the data queued on its own path. That needs a lot of data in flight,
+// so a switch made with more than a quarter of the send window unacknowledged
+// doubles the time before the next one, and only a path that stays healthy
+// for maxSwitchGap resets it. With little in flight, as in interactive use,
+// silence means a dead path, and every switch may happen as soon as needed.
 func (s *Session) watchActive() {
 	t := time.NewTicker(s.cfg.SwitchAfter / 4)
 	defer t.Stop()
@@ -621,13 +623,17 @@ func (s *Session) watchActive() {
 			return
 		case <-t.C:
 		}
-		old, next, quiet := s.leaveQuietPath(last, gap)
+		old, next, quiet, inFlight := s.leaveQuietPath(last, gap)
 		switch {
 		case next != nil:
 			go s.resync(next, true)
 			s.pathFailed(old)
 			last, healthySince = time.Now(), time.Time{}
-			gap = min(2*gap, maxSwitchGap)
+			if inFlight > s.cfg.SendWindow/4 {
+				gap = min(2*gap, maxSwitchGap)
+			} else {
+				gap = s.cfg.SwitchAfter
+			}
 		case quiet:
 			healthySince = time.Time{}
 		case healthySince.IsZero():
@@ -640,28 +646,30 @@ func (s *Session) watchActive() {
 
 // leaveQuietPath makes the least quiet other path active if the active one
 // has been quiet for SwitchAfter and the last switch was at least gap ago. It
-// returns the old and the new path if it switched, and whether the active
-// path is quiet.
-func (s *Session) leaveQuietPath(last time.Time, gap time.Duration) (old, next *pathState, quiet bool) {
+// returns the old and the new path if it switched, whether the active path is
+// quiet, and how much was unacknowledged at the time.
+func (s *Session) leaveQuietPath(last time.Time, gap time.Duration) (old, next *pathState, quiet bool, inFlight int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.active == nil {
-		return nil, nil, false
+		return nil, nil, false, 0
 	}
 	q, ok := s.active.p.(QuietPath)
 	if !ok || q.Quiet() < s.cfg.SwitchAfter {
-		return nil, nil, false
+		return nil, nil, false, 0
 	}
 	if time.Since(last) < gap {
-		return nil, nil, true
+		return nil, nil, true, 0
 	}
+	// The other path need not be fresh, only heard from more recently than
+	// this one and recently enough to be trusted.
 	best, d := s.leastQuietLocked(s.active)
-	if best == nil || d >= s.cfg.SwitchAfter {
-		return nil, nil, true
+	if best == nil || d >= q.Quiet() || d >= 2*s.cfg.SwitchAfter {
+		return nil, nil, true, 0
 	}
 	old = s.active
 	s.active = best
-	return old, best, true
+	return old, best, true, s.unackedBytes
 }
 
 // leastQuietLocked returns the path, other than skip, that the peer was most

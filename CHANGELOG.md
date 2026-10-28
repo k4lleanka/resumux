@@ -17,3 +17,4 @@ First version.
 - `-proxy-protocol` tells the target each client's address with a PROXY
   protocol v2 header. A proxy's client-address header is used only on
   requests from `-trusted-proxies`.
+- `flakyproxy -freeze` silences a connection without closing it.

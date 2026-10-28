@@ -13,5 +13,5 @@ docker run --rm -v "$PWD/examples/sshdemo:/d:ro" alpine:3.22 sh /d/run.sh
 ```
 
 Without resumux, SSH is closed at the first cut. With resumux, all 20 lines
-arrive one second apart while flakyproxy logs `cut 4 connections` every three
+arrive one second apart while flakyproxy logs `cut 2 connections` every three
 seconds.

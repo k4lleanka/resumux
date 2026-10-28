@@ -60,15 +60,15 @@ func (c ClientConfig) withDefaults() ClientConfig {
 		c.Session.Linger = c.ResumeTimeout
 	}
 	c.Session.FollowPeer = false
-	// An idle path is heard from once per ping plus a round trip, so it only
-	// counts as quiet once it is late by half an interval, and by at least
-	// half a second, whatever the ping interval.
+	// An idle path is heard from about once per ping interval, plus a round
+	// trip, so it only counts as quiet once it has missed a whole answer: two
+	// intervals, and at least half a second more than one.
 	if c.Session.SwitchAfter <= 0 {
 		ping := c.Path.PingInterval
 		if ping <= 0 {
 			ping = time.Second
 		}
-		c.Session.SwitchAfter = ping + max(ping/2, 500*time.Millisecond)
+		c.Session.SwitchAfter = max(2*ping, ping+500*time.Millisecond)
 	}
 	return c
 }
