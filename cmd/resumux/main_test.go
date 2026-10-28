@@ -48,3 +48,18 @@ func TestLoadConfigRejectsUnknownSettings(t *testing.T) {
 		t.Fatal("accepted a misspelled setting")
 	}
 }
+
+func TestServerURLs(t *testing.T) {
+	got, err := serverURLs("wss://a.example/ , wss://a.example:8443/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "wss://a.example/" || got[1] != "wss://a.example:8443/" {
+		t.Fatalf("got %q", got)
+	}
+	for _, bad := range []string{"", "https://a.example/", "wss://a.example/,", "a.example"} {
+		if _, err := serverURLs(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

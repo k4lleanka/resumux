@@ -40,7 +40,7 @@ func BenchmarkRoundTripDirect(b *testing.B) {
 
 func BenchmarkRoundTripTunnel(b *testing.B) {
 	h := startServer(b, ServerConfig{})
-	addr := startClient(b, ClientConfig{ServerURL: h.url})
+	addr := startClient(b, ClientConfig{ServerURLs: []string{h.url}})
 	pingPong(b, addr)
 }
 
@@ -68,6 +68,6 @@ func BenchmarkThroughputDirect(b *testing.B) {
 
 func BenchmarkThroughputTunnel(b *testing.B) {
 	h := startServer(b, ServerConfig{})
-	addr := startClient(b, ClientConfig{ServerURL: h.url})
+	addr := startClient(b, ClientConfig{ServerURLs: []string{h.url}})
 	throughput(b, addr)
 }

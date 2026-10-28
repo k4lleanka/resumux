@@ -182,7 +182,7 @@ func randomData(t *testing.T, n int) []byte {
 
 func TestEcho(t *testing.T) {
 	h := startServer(t, ServerConfig{})
-	addr := startClient(t, ClientConfig{ServerURL: h.url})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
 
 	want := randomData(t, 2<<20)
 	if got := roundTrip(t, addr, want); !bytes.Equal(got, want) {
@@ -194,7 +194,7 @@ func TestEcho(t *testing.T) {
 // while data flows. The TCP connection through the tunnel must not notice.
 func TestPathsCutDuringTransfer(t *testing.T) {
 	h := startServer(t, ServerConfig{})
-	addr := startClient(t, ClientConfig{ServerURL: h.url, Paths: 3})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Paths: 3})
 
 	stop := make(chan struct{})
 	cuts := make(chan int, 1)
@@ -227,7 +227,7 @@ func TestPathsCutDuringTransfer(t *testing.T) {
 
 func TestWrongTokenIsRejected(t *testing.T) {
 	h := startServer(t, ServerConfig{})
-	cl, err := NewClient(ClientConfig{ServerURL: h.url, Token: "wrong", Logger: quiet})
+	cl, err := NewClient(ClientConfig{ServerURLs: []string{h.url}, Token: "wrong", Logger: quiet})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
 func TestManyConnectionsWhilePathsAreCut(t *testing.T) {
 	h := startServer(t, ServerConfig{})
-	addr := startClient(t, ClientConfig{ServerURL: h.url})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -395,7 +395,7 @@ func TestHalfClose(t *testing.T) {
 		fmt.Fprintf(c, "got %d bytes", len(b))
 	})
 	h := startServer(t, ServerConfig{Target: target})
-	addr := startClient(t, ClientConfig{ServerURL: h.url})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -423,7 +423,7 @@ func TestTargetClosesFirst(t *testing.T) {
 		c.Close()
 	})
 	h := startServer(t, ServerConfig{Target: target})
-	addr := startClient(t, ClientConfig{ServerURL: h.url})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -465,8 +465,8 @@ func TestTLSWithTrustedCertificate(t *testing.T) {
 	pool := x509.NewCertPool()
 	pool.AddCert(hs.Certificate())
 	addr := startClient(t, ClientConfig{
-		ServerURL: url,
-		Dialer:    &websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool}},
+		ServerURLs: []string{url},
+		Dialer:     &websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool}},
 	})
 
 	want := randomData(t, 1<<20)
@@ -479,7 +479,7 @@ func TestTLSWithTrustedCertificate(t *testing.T) {
 // client must fail at once instead of retrying until the resume timeout.
 func TestTLSWithUntrustedCertificateFailsFast(t *testing.T) {
 	_, url := startTLSServer(t)
-	cl, err := NewClient(ClientConfig{ServerURL: url, Token: testToken, Logger: quiet})
+	cl, err := NewClient(ClientConfig{ServerURLs: []string{url}, Token: testToken, Logger: quiet})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestTailSurvivesOutageAfterServerFinishes(t *testing.T) {
 		c.Close()
 	})
 	h := startServer(t, ServerConfig{Target: target})
-	addr := startClient(t, ClientConfig{ServerURL: h.url})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -557,7 +557,7 @@ func TestLostSessionIsAnErrorNotEOF(t *testing.T) {
 		}
 	})
 	h := startServer(t, ServerConfig{Target: target, ResumeTimeout: 500 * time.Millisecond})
-	addr := startClient(t, ClientConfig{ServerURL: h.url, ResumeTimeout: 500 * time.Millisecond})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, ResumeTimeout: 500 * time.Millisecond})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -729,7 +729,7 @@ func startFreezable(t *testing.T) (*freezingListener, string) {
 		sv.Close()
 		hs.Close()
 	})
-	return fl, startClient(t, ClientConfig{ServerURL: "ws" + strings.TrimPrefix(hs.URL, "http")})
+	return fl, startClient(t, ClientConfig{ServerURLs: []string{"ws" + strings.TrimPrefix(hs.URL, "http")}})
 }
 
 // freezeFirst waits for a second path, then freezes the first, which is the
@@ -781,5 +781,104 @@ func TestSilentPathDuringTransfer(t *testing.T) {
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("8 MiB with a frozen path took %s", d.Round(time.Millisecond))
+	}
+}
+
+// serveOn starts another HTTP listener for sv and returns its URL and a
+// count of the connections it accepted.
+func serveOn(t *testing.T, sv *Server) (string, *atomic.Int32) {
+	t.Helper()
+	var n atomic.Int32
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		sv.ServeHTTP(w, r)
+	}))
+	t.Cleanup(hs.Close)
+	return "ws" + strings.TrimPrefix(hs.URL, "http"), &n
+}
+
+// echoOn sends msg on c and checks that it comes back.
+func echoOn(t *testing.T, c net.Conn, msg string) {
+	t.Helper()
+	if _, err := c.Write([]byte(msg)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != msg {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// TestPathsSpreadOverURLs checks that a session uses every URL it is given,
+// which is what puts its paths on different routes.
+func TestPathsSpreadOverURLs(t *testing.T) {
+	h := startServer(t, ServerConfig{})
+	url2, hits := serveOn(t, h.server)
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url, url2}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	echoOn(t, c, "hello")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for hits.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the second URL was never used")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	echoOn(t, c, "still here")
+}
+
+// TestURLReachingAnotherServerDoesNotEndSession gives the client a second URL
+// that reaches a different server, which answers 404 for the session. That
+// must not end a session whose other path is fine.
+func TestURLReachingAnotherServerDoesNotEndSession(t *testing.T) {
+	h := startServer(t, ServerConfig{})
+	other := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url, other.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	echoOn(t, c, "hello")
+	// Long enough for the second path to be refused several times.
+	time.Sleep(2 * time.Second)
+	echoOn(t, c, "still here")
+	if n := h.server.NumSessions(); n != 1 {
+		t.Fatalf("got %d sessions on the real server, want 1", n)
+	}
+}
+
+// TestFirstDialTriesNextURL checks that a session opens through the second
+// URL at once when the first does not answer.
+func TestFirstDialTriesNextURL(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := "ws://" + l.Addr().String() + "/"
+	l.Close()
+
+	h := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{dead, h.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	start := time.Now()
+	echoOn(t, c, "hello")
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("took %s to open through the second URL", d.Round(time.Millisecond))
 	}
 }

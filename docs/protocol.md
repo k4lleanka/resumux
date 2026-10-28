@@ -48,10 +48,14 @@ Errors are plain HTTP responses:
 | 502 | the server could not connect to its target |
 | 503 | a new session was refused: the server has the maximum number of sessions, or is shutting down |
 
-A client that gets 404 while resuming must treat the session as lost: data it
-sent may not have arrived. 410, which the server only answers to the correct
-secret, means the session finished cleanly and nothing was lost. The server
-remembers finished sessions for the resume timeout.
+A client that gets 404 while resuming must treat the session as lost, since
+data it sent may not have arrived, unless another of its paths is still
+attached. That path shows the server does know the session, so the URL just
+used reaches a different server; the client keeps retrying it instead.
+
+410, which the server only answers to the correct secret, means the session
+finished cleanly and nothing was lost. The server remembers finished
+sessions for the resume timeout.
 
 ## Frames
 

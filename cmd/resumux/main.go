@@ -19,6 +19,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -213,7 +214,7 @@ func runClient(args []string) error {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
 	config := fs.String("config", "", "JSON file with settings")
 	listen := fs.String("listen", "", "local address to accept connections on (required)")
-	server := fs.String("server", "", "server URL, e.g. wss://example.com/ (required)")
+	server := fs.String("server", "", "server URL, e.g. wss://example.com/, or several separated by commas that reach the same server (required)")
 	tokenFile := fs.String("token-file", "", "file with the shared token (or set RESUMUX_TOKEN)")
 	paths := fs.Int("paths", 2, "WebSocket paths kept open per session")
 	host := fs.String("host", "", "Host header to send, if it differs from the server URL")
@@ -226,6 +227,10 @@ func runClient(args []string) error {
 	}
 	if *listen == "" || *server == "" {
 		return errors.New("-listen and -server are required")
+	}
+	urls, err := serverURLs(*server)
+	if err != nil {
+		return err
 	}
 	if *deadAfter < time.Second {
 		return errors.New("-dead-after must be at least 1s")
@@ -244,7 +249,7 @@ func runClient(args []string) error {
 		return err
 	}
 	cl, err := tunnel.NewClient(tunnel.ClientConfig{
-		ServerURL:     *server,
+		ServerURLs:    urls,
 		Token:         token,
 		Paths:         *paths,
 		ResumeTimeout: *resume,
@@ -298,4 +303,18 @@ func wsDialer(caFile string) (*websocket.Dialer, error) {
 // alone never drop a healthy path.
 func pathOptions(deadAfter time.Duration) wspath.Options {
 	return wspath.Options{PingInterval: deadAfter / 5, DeadAfter: deadAfter}
+}
+
+// serverURLs splits a comma-separated -server value and checks each URL.
+func serverURLs(s string) ([]string, error) {
+	var urls []string
+	for _, u := range strings.Split(s, ",") {
+		u = strings.TrimSpace(u)
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "ws" && parsed.Scheme != "wss") || parsed.Host == "" {
+			return nil, fmt.Errorf("-server: %q is not a ws:// or wss:// URL", u)
+		}
+		urls = append(urls, u)
+	}
+	return urls, nil
 }

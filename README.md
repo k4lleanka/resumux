@@ -109,6 +109,25 @@ resumux client -config client.json
 
 Run `resumux server -h` and `resumux client -h` for all flags.
 
+## Spread paths over several routes
+
+Paths to the same URL can take the same route and fail together. Give the
+client several URLs that reach the same server, separated by commas, and its
+paths take them in turn:
+
+```sh
+resumux client -listen 127.0.0.1:2222 -token-file token \
+  -server wss://example.com/,wss://example.com:8443/,wss://direct.example.com/
+```
+
+They can differ in port, so that a CDN serves them as separate connections,
+in address, or in provider, such as one URL through a CDN and one straight to
+the server. The server has to be reachable on each. Cloudflare, for example,
+proxies HTTPS on ports 443, 2053, 2083, 2087, 2096 and 8443. A session gets at
+least one path per URL, and the first connection falls through to the next
+URL when one does not answer. A URL that reaches a different server is logged
+and retried; it does not end a session whose other paths still work.
+
 ## Try it on a flaky link
 
 `examples/flakyproxy` forwards TCP and cuts every connection at a fixed

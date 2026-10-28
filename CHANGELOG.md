@@ -10,3 +10,5 @@ First version.
 - Shared-token authentication, per-session secrets, and limits on sessions,
   paths and buffered data.
 - `resumux server` and `resumux client`, with JSON config files.
+- Several server URLs per client, so a session's paths can take different
+  routes, such as different CDN edges or a CDN and a direct address.

@@ -18,12 +18,16 @@ import (
 
 // ClientConfig configures a Client.
 type ClientConfig struct {
-	// ServerURL is the server's WebSocket URL, e.g. wss://example.com/tunnel.
-	ServerURL string
+	// ServerURLs are WebSocket URLs that all reach the same server, e.g.
+	// wss://example.com/tunnel. Paths take them in turn, so URLs that differ in
+	// port or address can spread a session over different routes, such as
+	// different CDN edges. At least one is required.
+	ServerURLs []string
 	// Token is the shared secret the server expects. Required.
 	Token string
 	// Paths is how many WebSocket paths each session keeps open. More paths
-	// make a switch instant when one dies.
+	// make a switch instant when one dies. It is at least 2, and at least the
+	// number of ServerURLs.
 	Paths int
 	// ResumeTimeout is how long a session may go without any path before the
 	// client gives up on it.
@@ -39,9 +43,7 @@ type ClientConfig struct {
 }
 
 func (c ClientConfig) withDefaults() ClientConfig {
-	if c.Paths <= 0 {
-		c.Paths = 2
-	}
+	c.Paths = max(c.Paths, 2, len(c.ServerURLs))
 	if c.ResumeTimeout <= 0 {
 		c.ResumeTimeout = 2 * time.Minute
 	}
@@ -77,8 +79,13 @@ type Client struct {
 
 // NewClient validates cfg and returns a Client.
 func NewClient(cfg ClientConfig) (*Client, error) {
-	if cfg.ServerURL == "" {
+	if len(cfg.ServerURLs) == 0 {
 		return nil, errors.New("tunnel: client server URL is required")
+	}
+	for _, u := range cfg.ServerURLs {
+		if u == "" {
+			return nil, errors.New("tunnel: client server URL is empty")
+		}
 	}
 	if cfg.Token == "" {
 		return nil, errors.New("tunnel: client token is required")
@@ -111,7 +118,7 @@ var errSessionFinished = errors.New("tunnel: session finished")
 
 type sessionAuth struct{ id, secret string }
 
-func (cl *Client) dial(ctx context.Context, auth *sessionAuth) (*websocket.Conn, *http.Response, error) {
+func (cl *Client) dial(ctx context.Context, url string, auth *sessionAuth) (*websocket.Conn, *http.Response, error) {
 	h := http.Header{}
 	for k, v := range cl.cfg.Header {
 		h[k] = v
@@ -122,7 +129,7 @@ func (cl *Client) dial(ctx context.Context, auth *sessionAuth) (*websocket.Conn,
 		h.Set(headerSession, auth.id)
 		h.Set(headerSecret, auth.secret)
 	}
-	c, resp, err := cl.cfg.Dialer.DialContext(ctx, cl.cfg.ServerURL, h)
+	c, resp, err := cl.cfg.Dialer.DialContext(ctx, url, h)
 	if err != nil && resp != nil {
 		switch resp.StatusCode {
 		case http.StatusNotFound:
@@ -141,7 +148,7 @@ func (cl *Client) dial(ctx context.Context, auth *sessionAuth) (*websocket.Conn,
 func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 	defer local.Close()
 
-	first, resp, err := cl.dialFirst(ctx)
+	first, resp, firstURL, err := cl.dialFirst(ctx)
 	if err != nil {
 		return err
 	}
@@ -160,9 +167,12 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 	s.AddPath(firstPath)
 
 	go expireWithoutPaths(s, cl.cfg.ResumeTimeout, ErrSessionExpired)
-	go cl.keepPath(s, auth, firstPath)
+	// The first path keeps the URL that worked; the others take the rest in
+	// turn, so every URL is in use when there are enough paths.
+	urls := cl.cfg.ServerURLs
+	go cl.keepPath(s, auth, urls[firstURL], firstPath)
 	for i := 1; i < cl.cfg.Paths; i++ {
-		go cl.keepPath(s, auth, nil)
+		go cl.keepPath(s, auth, urls[(firstURL+i)%len(urls)], nil)
 	}
 
 	// A stream that ended cleanly is not an error, even if a path redial then
@@ -175,22 +185,28 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 	return nil
 }
 
-// dialFirst opens the path that creates the session. Network errors are
-// retried with backoff for up to ResumeTimeout; an answer from the server,
-// such as a rejected token, is final.
-func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Response, error) {
+// dialFirst opens the path that creates the session, trying each URL in turn,
+// and returns the index of the one that worked. Network errors are retried,
+// with backoff after every full round, for up to ResumeTimeout; an answer
+// from the server, such as a rejected token, is final.
+func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Response, int, error) {
+	urls := cl.cfg.ServerURLs
 	deadline := time.Now().Add(cl.cfg.ResumeTimeout)
 	backoff := 250 * time.Millisecond
-	for {
-		c, resp, err := cl.dial(ctx, nil)
+	for attempt := 0; ; attempt++ {
+		i := attempt % len(urls)
+		c, resp, err := cl.dial(ctx, urls[i], nil)
 		var certErr *tls.CertificateVerificationError
 		if err == nil || resp != nil || errors.As(err, &certErr) || time.Now().After(deadline) {
-			return c, resp, err
+			return c, resp, i, err
+		}
+		if i < len(urls)-1 {
+			continue
 		}
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+			return nil, nil, 0, ctx.Err()
 		}
 		backoff = min(backoff*2, 5*time.Second)
 	}
@@ -198,9 +214,10 @@ func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Respons
 
 // keepPath keeps one path slot filled for the lifetime of the session,
 // redialing with backoff whenever its path dies.
-func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, p *wspath.Path) {
+func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, url string, p *wspath.Path) {
 	backoff := 250 * time.Millisecond
 	failures := 0
+	strayWarned := false
 	for {
 		if p != nil {
 			select {
@@ -218,13 +235,24 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, p *wspath.Path
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		c, _, err := cl.dial(ctx, auth)
+		c, _, err := cl.dial(ctx, url, auth)
 		cancel()
 		if errors.Is(err, errSessionFinished) {
 			s.Abort(nil)
 			return
 		}
-		if errors.Is(err, errSessionGone) {
+		if errors.Is(err, errSessionGone) && s.NumPaths() > 0 {
+			// Another path is still attached, so the server does know the
+			// session: this URL reaches a server that does not. Ending the
+			// session over it would drop a healthy connection, so keep
+			// retrying it like any other failure. If the other paths are in
+			// fact stale, they die within seconds and the next 404 ends it.
+			if !strayWarned {
+				cl.cfg.Logger.Printf("session %s: %s reaches a server that does not know this session", auth.id[:8], url)
+				strayWarned = true
+			}
+			err = errors.New("tunnel: session unknown at this URL")
+		} else if errors.Is(err, errSessionGone) {
 			// The server forgets a session once it has finished with it. If
 			// nothing is missing on this side either, that is a normal end,
 			// not a loss, and there is no peer left to wait for.
