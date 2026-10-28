@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -21,6 +23,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/k4lleanka/resumux/tunnel"
 )
@@ -199,6 +203,7 @@ func runClient(args []string) error {
 	tokenFile := fs.String("token-file", "", "file with the shared token (or set RESUMUX_TOKEN)")
 	paths := fs.Int("paths", 2, "WebSocket paths kept open per session")
 	host := fs.String("host", "", "Host header to send, if it differs from the server URL")
+	caFile := fs.String("ca-file", "", "PEM file with CA certificates to trust instead of the system ones")
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long to keep trying to resume a session")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
@@ -216,12 +221,17 @@ func runClient(args []string) error {
 	if *host != "" {
 		header = http.Header{"Host": {*host}}
 	}
+	dialer, err := wsDialer(*caFile)
+	if err != nil {
+		return err
+	}
 	cl, err := tunnel.NewClient(tunnel.ClientConfig{
 		ServerURL:     *server,
 		Token:         token,
 		Paths:         *paths,
 		ResumeTimeout: *resume,
 		Header:        header,
+		Dialer:        dialer,
 	})
 	if err != nil {
 		return err
@@ -244,4 +254,23 @@ func runClient(args []string) error {
 		return nil
 	}
 	return err
+}
+
+// wsDialer returns a WebSocket dialer that trusts the certificates in caFile,
+// or the system's if caFile is empty.
+func wsDialer(caFile string) (*websocket.Dialer, error) {
+	d := *websocket.DefaultDialer
+	if caFile == "" {
+		return &d, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s: no PEM certificates found", caFile)
+	}
+	d.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	return &d, nil
 }

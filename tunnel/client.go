@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -78,7 +79,7 @@ func (cl *Client) Serve(l net.Listener) error {
 		}
 		go func() {
 			if err := cl.Handle(context.Background(), c); err != nil {
-				cl.cfg.Logger.Printf("resumux: %v", err)
+				cl.cfg.Logger.Printf("%v", err)
 			}
 		}()
 	}
@@ -160,7 +161,8 @@ func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Respons
 	backoff := 250 * time.Millisecond
 	for {
 		c, resp, err := cl.dial(ctx, nil)
-		if err == nil || resp != nil || time.Now().After(deadline) {
+		var certErr *tls.CertificateVerificationError
+		if err == nil || resp != nil || errors.As(err, &certErr) || time.Now().After(deadline) {
 			return c, resp, err
 		}
 		select {

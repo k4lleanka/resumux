@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -408,5 +411,56 @@ func TestTargetClosesFirst(t *testing.T) {
 			t.Fatal("session still open after both ends closed")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func startTLSServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewTLSServer(sv)
+	t.Cleanup(func() {
+		sv.Close()
+		hs.Close()
+	})
+	return hs, "wss" + strings.TrimPrefix(hs.URL, "https")
+}
+
+func TestTLSWithTrustedCertificate(t *testing.T) {
+	hs, url := startTLSServer(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(hs.Certificate())
+	addr := startClient(t, ClientConfig{
+		ServerURL: url,
+		Dialer:    &websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool}},
+	})
+
+	want := randomData(t, 1<<20)
+	if got := roundTrip(t, addr, want); !bytes.Equal(got, want) {
+		t.Fatalf("got %d bytes back, want %d", len(got), len(want))
+	}
+}
+
+// An untrusted certificate will not become trusted by retrying, so the
+// client must fail at once instead of retrying until the resume timeout.
+func TestTLSWithUntrustedCertificateFailsFast(t *testing.T) {
+	_, url := startTLSServer(t)
+	cl, err := NewClient(ClientConfig{ServerURL: url, Token: testToken, Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := net.Pipe()
+	defer b.Close()
+
+	start := time.Now()
+	err = cl.Handle(context.Background(), a)
+	var certErr *tls.CertificateVerificationError
+	if !errors.As(err, &certErr) {
+		t.Fatalf("got %v, want a certificate verification error", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %s to give up", d)
 	}
 }
