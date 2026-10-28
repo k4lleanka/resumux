@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,5 +103,47 @@ func TestTextMessageIsRejected(t *testing.T) {
 	peer.WriteMessage(websocket.TextMessage, []byte("nope"))
 	if _, err := p.ReadFrame(); err == nil {
 		t.Fatal("text message accepted")
+	}
+}
+
+// A path that is receiving frames must not be pinged: the ping would only
+// compete with the traffic, which costs latency in interactive use.
+func TestBusyPathIsNotPinged(t *testing.T) {
+	p, peer := pair(t, Options{PingInterval: 50 * time.Millisecond, DeadAfter: time.Second})
+	var pings atomic.Int32
+	peer.SetPingHandler(func(string) error {
+		pings.Add(1)
+		return nil
+	})
+	go func() {
+		for {
+			if _, _, err := peer.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			if _, err := p.ReadFrame(); err != nil {
+				return
+			}
+		}
+	}()
+
+	stop := time.After(500 * time.Millisecond)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			if n := pings.Load(); n != 0 {
+				t.Fatalf("busy path got %d pings", n)
+			}
+			return
+		case <-tick.C:
+			if err := peer.WriteMessage(websocket.BinaryMessage, []byte{1}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }

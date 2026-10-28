@@ -79,13 +79,18 @@ func (p *Path) keepalive() {
 		case <-p.done:
 			return
 		case <-t.C:
-			p.wmu.Lock()
-			err := p.c.WriteControl(websocket.PingMessage, nil, time.Now().Add(p.opts.WriteTimeout))
-			p.wmu.Unlock()
-			if err != nil {
-				p.Close()
-				return
-			}
+		}
+		// A path that is delivering frames needs no proof that it works, and a
+		// ping would only compete with them for the connection.
+		if p.Quiet() < p.opts.PingInterval {
+			continue
+		}
+		p.wmu.Lock()
+		err := p.c.WriteControl(websocket.PingMessage, nil, time.Now().Add(p.opts.WriteTimeout))
+		p.wmu.Unlock()
+		if err != nil {
+			p.Close()
+			return
 		}
 	}
 }

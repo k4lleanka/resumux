@@ -139,10 +139,11 @@ so many tiny frames cannot use more memory than the window suggests.
 
 ## Liveness
 
-Each side sends a WebSocket ping every second by default, and treats a path
-as dead after 5 seconds without receiving a complete message, pongs
-included. CDNs and proxies close idle WebSockets, which the pings also
-prevent.
+Each side sends a WebSocket ping on a path once it has heard nothing on it
+for a second by default, and treats a path as dead after 5 seconds without
+receiving a complete message, pongs included. A path that is carrying
+frames is not pinged, so pings never compete with traffic. CDNs and proxies
+close idle WebSockets, which the pings also prevent.
 
 The client does not wait that long when it has a choice. If the path it sends
 on has been silent for a ping interval plus half an interval, or plus half a

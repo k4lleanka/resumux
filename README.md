@@ -33,8 +33,9 @@ WebSocket paths at once.
   acknowledged is sent again.
 - A path that goes silent without closing, as when a proxy drops it, is
   normally left within two seconds if another path is healthy, and counts as
-  dead after 5 seconds otherwise (`-dead-after`). Pings every second keep
-  both checks honest on idle paths.
+  dead after 5 seconds otherwise (`-dead-after`). Idle paths are pinged
+  every second to keep both checks honest; busy ones are not, so pings never
+  compete with traffic.
 
 A path can therefore fail at any moment without the stream losing, repeating
 or reordering a byte. Acknowledgements only count data the application has
