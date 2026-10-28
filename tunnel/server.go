@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,17 @@ type ServerConfig struct {
 	ResumeTimeout time.Duration
 	// DialTimeout bounds connecting to Target.
 	DialTimeout time.Duration
+	// ProxyProtocol makes the server begin every connection to Target with a
+	// PROXY protocol version 2 header naming the client's address, for
+	// targets that would otherwise see every client as this server.
+	ProxyProtocol bool
+	// TrustedProxies are the addresses of proxies in front of the server,
+	// such as a CDN connector on the same machine. Only requests from them
+	// may name the client's address in ClientIPHeader.
+	TrustedProxies []netip.Prefix
+	// ClientIPHeader is the request header in which trusted proxies give
+	// the client's address, e.g. CF-Connecting-IP.
+	ClientIPHeader string
 
 	Path    wspath.Options
 	Session session.Config
@@ -194,6 +206,18 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "target unavailable", http.StatusBadGateway)
 		return
 	}
+	client := clientAddr(r, sv.cfg)
+	if sv.cfg.ProxyProtocol {
+		target.SetWriteDeadline(time.Now().Add(sv.cfg.DialTimeout))
+		_, err := target.Write(proxyHeader(client, localAddr(r)))
+		target.SetWriteDeadline(time.Time{})
+		if err != nil {
+			target.Close()
+			sv.cfg.Logger.Printf("dial target: %v", err)
+			http.Error(w, "target unavailable", http.StatusBadGateway)
+			return
+		}
+	}
 	id, err1 := randomHex(16)
 	secret, err2 := randomHex(32)
 	if err1 != nil || err2 != nil {
@@ -232,7 +256,7 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.AddPath(wspath.New(c, sv.cfg.Path))
-	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], r.RemoteAddr)
+	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], client)
 	start := time.Now()
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
 	go func() {

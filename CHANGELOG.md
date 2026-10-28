@@ -14,3 +14,6 @@ First version.
   routes, such as different CDN edges or a CDN and a direct address.
 - A clean close half-closes each path and waits briefly for the peer, so the
   last acknowledgement is not lost to a connection reset.
+- `-proxy-protocol` tells the target each client's address with a PROXY
+  protocol v2 header. A proxy's client-address header is used only on
+  requests from `-trusted-proxies`.

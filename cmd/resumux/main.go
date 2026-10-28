@@ -19,6 +19,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -156,6 +157,9 @@ func runServer(args []string) error {
 	maxPaths := fs.Int("max-paths", 8, "maximum paths per session")
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long a session without paths is kept")
 	deadAfter := fs.Duration("dead-after", 5*time.Second, "how long a path may stay silent before it is dropped")
+	proxyProto := fs.Bool("proxy-protocol", false, "begin each connection to the target with a PROXY protocol v2 header naming the client")
+	trustedProxies := fs.String("trusted-proxies", "", "comma-separated addresses or CIDR ranges of proxies allowed to name the client in -client-ip-header")
+	clientIPHeader := fs.String("client-ip-header", "", "header in which trusted proxies name the client, e.g. CF-Connecting-IP")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -165,6 +169,13 @@ func runServer(args []string) error {
 	}
 	if *deadAfter < time.Second {
 		return errors.New("-dead-after must be at least 1s")
+	}
+	proxies, err := parsePrefixes(*trustedProxies)
+	if err != nil {
+		return err
+	}
+	if (len(proxies) == 0) != (*clientIPHeader == "") {
+		return errors.New("-trusted-proxies and -client-ip-header must be given together")
 	}
 	if !strings.HasPrefix(*path, "/") {
 		return fmt.Errorf("-path must start with /, got %q", *path)
@@ -184,6 +195,9 @@ func runServer(args []string) error {
 		MaxPathsPerSession: *maxPaths,
 		ResumeTimeout:      *resume,
 		Path:               pathOptions(*deadAfter),
+		ProxyProtocol:      *proxyProto,
+		TrustedProxies:     proxies,
+		ClientIPHeader:     *clientIPHeader,
 	})
 	if err != nil {
 		return err
@@ -326,4 +340,45 @@ func serverURLs(s string) ([]string, error) {
 		urls = append(urls, u)
 	}
 	return urls, nil
+}
+
+// parsePrefixes parses a comma-separated list of addresses and CIDR ranges.
+// A bare address stands for itself alone. IPv4 written as IPv6 is turned
+// back into IPv4, since the server compares unmapped addresses. A range
+// covering every address is refused: it would let anyone name any client.
+func parsePrefixes(s string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []netip.Prefix
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		var p netip.Prefix
+		if strings.Contains(f, "/") {
+			var err error
+			if p, err = netip.ParsePrefix(f); err != nil {
+				return nil, fmt.Errorf("-trusted-proxies: %q is not an address or CIDR range", f)
+			}
+			if p != p.Masked() {
+				return nil, fmt.Errorf("-trusted-proxies: %q has host bits set; did you mean %s?", f, p.Masked())
+			}
+		} else {
+			a, err := netip.ParseAddr(f)
+			if err != nil || a.Zone() != "" {
+				return nil, fmt.Errorf("-trusted-proxies: %q is not an address or CIDR range", f)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		if a := p.Addr(); a.Is4In6() {
+			if p.Bits() < 96 {
+				return nil, fmt.Errorf("-trusted-proxies: %q mixes IPv4 and IPv6", f)
+			}
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("-trusted-proxies: %q trusts every address, which would let any client name any address", f)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }

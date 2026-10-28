@@ -961,3 +961,47 @@ func TestFirstDialSkipsSilentURL(t *testing.T) {
 		t.Fatalf("took %s to get past a silent URL", d.Round(time.Millisecond))
 	}
 }
+
+// TestFirstDialSkipsForeignServer checks that a URL reaching a server with a
+// different token, which answers 401, does not stop the session from opening
+// through the next URL.
+func TestFirstDialSkipsForeignServer(t *testing.T) {
+	foreign := startServer(t, ServerConfig{Token: "someone-elses-token"})
+	h := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{foreign.url, h.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	echoOn(t, c, "hello")
+}
+
+// TestStray410DoesNotFinishSession checks that a 410 from a URL that never
+// carried a path of the session, such as a web server answering 410 for
+// unknown pages, neither ends the session nor passes for a clean finish.
+func TestStray410DoesNotFinishSession(t *testing.T) {
+	stray := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone", http.StatusGone)
+	}))
+	t.Cleanup(stray.Close)
+	h := startServer(t, ServerConfig{})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url, "ws" + strings.TrimPrefix(stray.URL, "http")}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(20 * time.Second))
+	echoOn(t, c, "before")
+
+	h.blocked.Store(true)
+	h.listener.cutAll()
+	time.Sleep(2 * time.Second)
+	h.blocked.Store(false)
+
+	echoOn(t, c, "after")
+}

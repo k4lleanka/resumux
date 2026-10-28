@@ -78,3 +78,31 @@ func TestLoadConfigList(t *testing.T) {
 		t.Fatalf("server = %q", *server)
 	}
 }
+
+func TestParsePrefixes(t *testing.T) {
+	got, err := parsePrefixes("127.0.0.1, 10.0.0.0/8, ::1, 2001:db8::/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"127.0.0.1/32", "10.0.0.0/8", "::1/128", "2001:db8::/32"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i].String() != want[i] {
+			t.Errorf("got %s, want %s", got[i], want[i])
+		}
+	}
+	for _, bad := range []string{"10.0.0.0/8, example.com", "0.0.0.0/0", "::/0", "10.0.0.1/8", "fe80::1%eth0", "::ffff:0:0/64"} {
+		if _, err := parsePrefixes(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	mapped, err := parsePrefixes("::ffff:127.0.0.1, ::ffff:10.0.0.0/104")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped[0].String() != "127.0.0.1/32" || mapped[1].String() != "10.0.0.0/8" {
+		t.Errorf("mapped addresses became %v", mapped)
+	}
+}

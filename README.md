@@ -165,6 +165,40 @@ Over the internet the path to the server, and through a CDN its nearest edge,
 adds far more than this. Run the benchmarks yourself with
 `go test -run '^$' -bench . ./tunnel/`.
 
+## Client addresses
+
+Without help, the target sees every connection as coming from the resumux
+server, so per-address limits and bans on the target stop working. Targets
+that speak the [PROXY protocol](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt)
+can be told the client's address instead:
+
+```sh
+resumux server -listen 127.0.0.1:8080 -target 127.0.0.1:7000 -token-file token \
+  -proxy-protocol
+```
+
+Each connection to the target then starts with a version 2 header naming the
+address the WebSocket came from. Behind a proxy or CDN, that is the proxy's
+address, and the client's is in a header the proxy adds. Name both the proxy
+and the header, and the server uses the header, but only on requests from
+that proxy:
+
+```sh
+  -proxy-protocol -trusted-proxies 127.0.0.1 -client-ip-header CF-Connecting-IP
+```
+
+Anyone can send that header, so a request from any other address is judged
+by where it really comes from. The header must also be one the trusted proxy
+always sets itself, replacing whatever the client sent, as Cloudflare does
+with CF-Connecting-IP. A header the proxy only passes through, such as
+X-Real-IP behind Cloudflare, lets every client name any address. With a
+chain of proxies that append to X-Forwarded-For, trust all of them: the
+server skips entries they added and takes the first one before them.
+
+The safest setup is a server that listens on loopback only, with the CDN's
+connector, such as cloudflared, on the same machine. Then nothing off that
+machine can reach the server except through the CDN.
+
 ## Security
 
 - Every path must present the shared token (`Authorization: Bearer`). It is
@@ -188,9 +222,9 @@ eight characters of the session id. Secrets are never logged.
 - Paths provide failover; they are not combined for more bandwidth.
 - Sessions live in the server's memory, so restarting the server ends them.
 - One server forwards to one target.
-- The target sees every connection as coming from the resumux server, not
-  from the original client, so per-address limits and bans on the target
-  stop working. There is no PROXY protocol support yet.
+- With `-proxy-protocol`, the target learns the client's address when the
+  session opens. If the client moves to another network mid-session, the
+  target keeps seeing the first address.
 - A client with more URLs than the server allows paths per session
   (`-max-paths`, 8 by default) has its extra paths refused.
 - A connection reset on one end reaches the other end as a normal close. The

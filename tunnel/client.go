@@ -193,18 +193,26 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 // dialFirst opens the path that creates the session, trying each URL in turn,
 // and returns the index of the one that worked. Any failure moves on to the
 // next URL, since one URL can fail for reasons that say nothing about the
-// others, such as a CDN error page or a certificate for another name. Only a
-// rejected token is final, because the server checks it the same way on
-// every URL. After a round in which some URL failed at the network level,
-// the round is repeated with backoff for up to ResumeTimeout; a round in
-// which every URL gave an answer ends with the last one.
+// others, such as a CDN error page, a certificate for another name, or a
+// server that rejects the token because it is not ours. After a round in
+// which some URL failed at the network level, the round is repeated with
+// backoff for up to ResumeTimeout; a round in which every URL gave an
+// answer ends with that answer.
 func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Response, int, error) {
 	urls := cl.cfg.ServerURLs
 	deadline := time.Now().Add(cl.cfg.ResumeTimeout)
 	backoff := 250 * time.Millisecond
+	// An answer from a server explains a failure better than a network
+	// error does, so it is what gets reported when every URL fails.
+	var answerErr, netErr error
+	var answerResp *http.Response
+	failed := func() (*websocket.Conn, *http.Response, int, error) {
+		if answerErr != nil {
+			return nil, answerResp, 0, answerErr
+		}
+		return nil, nil, 0, netErr
+	}
 	for round := 1; ; round++ {
-		var lastErr error
-		var lastResp *http.Response
 		retry := false
 		for i, u := range urls {
 			// Short enough that a URL which never answers does not hold up
@@ -218,17 +226,19 @@ func (cl *Client) dialFirst(ctx context.Context) (*websocket.Conn, *http.Respons
 			if ctx.Err() != nil {
 				return nil, nil, 0, ctx.Err()
 			}
-			if errors.Is(err, errBadToken) {
-				return nil, resp, i, err
-			}
 			var certErr *tls.CertificateVerificationError
-			if resp == nil && !errors.As(err, &certErr) {
+			if resp != nil || errors.As(err, &certErr) {
+				answerErr, answerResp = err, resp
+			} else {
+				netErr = err
 				retry = true
 			}
-			lastErr, lastResp = err, resp
+			if time.Now().After(deadline) {
+				return failed()
+			}
 		}
-		if !retry || time.Now().After(deadline) {
-			return nil, lastResp, 0, lastErr
+		if !retry {
+			return failed()
 		}
 		select {
 		case <-time.After(backoff):
@@ -269,21 +279,22 @@ func (cl *Client) keepPath(s *session.Session, auth *sessionAuth, trust *urlTrus
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		c, _, err := cl.dial(ctx, url, auth)
 		cancel()
-		if errors.Is(err, errSessionFinished) {
-			s.Abort(nil)
-			return
-		}
-		if errors.Is(err, errSessionGone) && !trust.trusted(url) {
+		gone := errors.Is(err, errSessionGone) || errors.Is(err, errSessionFinished)
+		if gone && !trust.trusted(url) {
 			// This URL has never carried a path of this session, so it may
-			// reach a server that does not know it, and its 404 proves
-			// nothing. Ending the session over it would drop a connection
-			// that a trusted URL can still resume, as when every path dies
-			// at once. If the session really is gone, it expires.
+			// reach a server that does not know it, and its 404 or 410
+			// proves nothing. Ending the session over it would drop a
+			// connection that a trusted URL can still resume, as when every
+			// path dies at once, or call a cut stream finished. If the
+			// session really is gone, it expires.
 			if !strayWarned {
 				cl.cfg.Logger.Printf("session %s: %s reaches a server that does not know this session", auth.id[:8], url)
 				strayWarned = true
 			}
 			err = errors.New("tunnel: session unknown at this URL")
+		} else if errors.Is(err, errSessionFinished) {
+			s.Abort(nil)
+			return
 		} else if errors.Is(err, errSessionGone) {
 			// The server forgets a session once it has finished with it. If
 			// nothing is missing on this side either, that is a normal end,
