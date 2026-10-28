@@ -113,7 +113,7 @@ to a path of its own choosing, and their choices can differ. If both followed
 each other they could keep swapping paths, resending everything each time.
 For the same reason the client sends nothing on a spare path until it starts
 using it. A path that stops delivering only toward the client is left once
-the client's liveness check gives up on it.
+the client notices the silence, as described under Liveness.
 
 When the server adds a path, and when the client adds the path it will send
 on, that side sends an ACK with its current position on it, so the peer can
@@ -141,9 +141,16 @@ so many tiny frames cannot use more memory than the window suggests.
 
 Each side sends a WebSocket ping every second by default, and treats a path
 as dead after 5 seconds without receiving a complete message, pongs
-included. A path that goes silent, as when a proxy drops it without closing
-it, is therefore left within seconds. CDNs and proxies also close idle
-WebSockets, which the pings prevent.
+included. CDNs and proxies close idle WebSockets, which the pings also
+prevent.
+
+The client does not wait that long when it has a choice. If the path it sends
+on has been silent for one and a half ping intervals while another path has
+not, it closes the silent path, switches, and sends everything
+unacknowledged again. It switches at most once per that interval. A path a
+proxy drops without closing is thus left in under two seconds. Only frames
+and pongs count as hearing from the peer, since they prove both directions
+work; a ping from the peer only proves one.
 
 A session with no path for the resume timeout (default 2 minutes) is closed on
 both sides. A session that is closing waits up to the same time for its

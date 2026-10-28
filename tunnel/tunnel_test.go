@@ -684,19 +684,7 @@ func (l *freezingListener) Accept() (net.Conn, error) {
 // second path is healthy. The session must move to the healthy path within a
 // few seconds, not wait for a long keepalive timeout.
 func TestSilentPathFailsOverQuickly(t *testing.T) {
-	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: testLogger(t, "server: ")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hs := httptest.NewUnstartedServer(sv)
-	fl := &freezingListener{Listener: hs.Listener}
-	hs.Listener = fl
-	hs.Start()
-	t.Cleanup(func() {
-		sv.Close()
-		hs.Close()
-	})
-	addr := startClient(t, ClientConfig{ServerURL: "ws" + strings.TrimPrefix(hs.URL, "http")})
+	fl, addr := startFreezable(t)
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -715,28 +703,83 @@ func TestSilentPathFailsOverQuickly(t *testing.T) {
 		}
 	}
 	echo("before")
+	fl.freezeFirst(t)
+	start := time.Now()
+	echo("after")
+	if d := time.Since(start); d > 3500*time.Millisecond {
+		t.Fatalf("took %s to move off a silent path", d.Round(time.Millisecond))
+	} else {
+		t.Logf("moved off the silent path in %s", d.Round(time.Millisecond))
+	}
+}
+
+// startFreezable starts a server whose connections can be frozen, and a
+// client for it, and returns the listener and the client's address.
+func startFreezable(t *testing.T) (*freezingListener, string) {
+	t.Helper()
+	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: testLogger(t, "server: ")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewUnstartedServer(sv)
+	fl := &freezingListener{Listener: hs.Listener}
+	hs.Listener = fl
+	hs.Start()
+	t.Cleanup(func() {
+		sv.Close()
+		hs.Close()
+	})
+	return fl, startClient(t, ClientConfig{ServerURL: "ws" + strings.TrimPrefix(hs.URL, "http")})
+}
+
+// freezeFirst waits for a second path, then freezes the first, which is the
+// one the client sends on.
+func (l *freezingListener) freezeFirst(t *testing.T) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		fl.mu.Lock()
-		n := len(fl.conns)
-		fl.mu.Unlock()
-		if n >= 2 {
-			break
+		l.mu.Lock()
+		if len(l.conns) >= 2 {
+			l.conns[0].frozen.Store(true)
+			l.mu.Unlock()
+			return
 		}
+		l.mu.Unlock()
 		if time.Now().After(deadline) {
 			t.Fatal("second path never connected")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
 
-	fl.mu.Lock()
-	fl.conns[0].frozen.Store(true)
-	fl.mu.Unlock()
+// TestSilentPathDuringTransfer freezes the active path in the middle of a
+// transfer. Every byte must still arrive once and in order.
+func TestSilentPathDuringTransfer(t *testing.T) {
+	fl, addr := startFreezable(t)
+	data := randomData(t, 8<<20)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+
 	start := time.Now()
-	echo("after")
-	if d := time.Since(start); d > 8*time.Second {
-		t.Fatalf("took %s to move off a silent path", d.Round(time.Millisecond))
-	} else {
-		t.Logf("moved off the silent path in %s", d.Round(time.Millisecond))
+	go func() {
+		// Freeze between the two halves, with the first still in flight.
+		c.Write(data[:len(data)/2])
+		fl.freezeFirst(t)
+		c.Write(data[len(data)/2:])
+		c.(*net.TCPConn).CloseWrite()
+	}()
+	got, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("got %d bytes, want %d, or contents differ", len(got), len(data))
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("8 MiB with a frozen path took %s", d.Round(time.Millisecond))
 	}
 }

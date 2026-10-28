@@ -4,6 +4,7 @@ package wspath
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -50,15 +51,19 @@ type Path struct {
 	wmu       sync.Mutex
 	closeOnce sync.Once
 	done      chan struct{}
+	// heard is when the last frame or pong arrived, measured from start on
+	// the monotonic clock so wall-clock jumps cannot fake silence.
+	start time.Time
+	heard atomic.Int64
 }
 
 // New wraps c and starts its keepalive.
 func New(c *websocket.Conn, opts Options) *Path {
-	p := &Path{c: c, opts: opts.withDefaults(), done: make(chan struct{})}
+	p := &Path{c: c, opts: opts.withDefaults(), done: make(chan struct{}), start: time.Now()}
 	c.SetReadLimit(p.opts.MaxFrameSize)
-	c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
+	p.markHeard()
 	c.SetPongHandler(func(string) error {
-		return c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
+		return p.markHeard()
 	})
 	go p.keepalive()
 	return p
@@ -94,8 +99,21 @@ func (p *Path) ReadFrame() ([]byte, error) {
 	if typ != websocket.BinaryMessage {
 		return nil, errUnexpectedMessage
 	}
-	p.c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
+	p.markHeard()
 	return b, nil
+}
+
+// markHeard records that the peer was just heard from on this path. A pong
+// counts, since it proves both directions work; a ping from the peer does
+// not, since it only proves one.
+func (p *Path) markHeard() error {
+	p.heard.Store(int64(time.Since(p.start)))
+	return p.c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
+}
+
+// Quiet reports how long ago the peer was last heard from on this path.
+func (p *Path) Quiet() time.Duration {
+	return time.Since(p.start) - time.Duration(p.heard.Load())
 }
 
 // WriteFrame sends b as one binary message.

@@ -24,6 +24,14 @@ type Path interface {
 	Close() error
 }
 
+// A QuietPath also reports how long ago the peer was last heard from on it.
+// A leading session uses this to move off a path that has gone silent
+// before the path itself gives up.
+type QuietPath interface {
+	Path
+	Quiet() time.Duration
+}
+
 // Config tunes a Session. Zero values select the defaults.
 type Config struct {
 	// MaxFrameSize is the largest payload put in one frame.
@@ -44,6 +52,11 @@ type Config struct {
 	// FollowPeer makes the session send on whichever path the peer last sent
 	// on. Set it on exactly one of the two sides.
 	FollowPeer bool
+	// SwitchAfter is how long the path a leading session sends on may stay
+	// quiet before the session moves to another path that is not. It only
+	// applies to QuietPaths, and must exceed their keepalive interval plus a
+	// round trip, or idle paths would look quiet.
+	SwitchAfter time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -61,6 +74,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Linger <= 0 {
 		c.Linger = 5 * time.Second
+	}
+	if c.SwitchAfter <= 0 {
+		c.SwitchAfter = 1500 * time.Millisecond
 	}
 	return c
 }
@@ -139,6 +155,9 @@ func New(cfg Config) *Session {
 	}
 	s.readCond = sync.NewCond(&s.mu)
 	s.writeCond = sync.NewCond(&s.mu)
+	if !s.cfg.FollowPeer {
+		go s.watchActive()
+	}
 	return s
 }
 
@@ -577,4 +596,60 @@ func (s *Session) Drained() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.finRead && s.writeClosed && len(s.unacked) == 0
+}
+
+// watchActive moves a leading session off a path that has gone quiet while
+// another has not, and drops the quiet one: a write blocked on it would
+// otherwise hold the writer until the path gave up by itself. If the path was
+// only slow, the cost is a redial and some harmless retransmission.
+func (s *Session) watchActive() {
+	t := time.NewTicker(s.cfg.SwitchAfter / 4)
+	defer t.Stop()
+	var last time.Time
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
+		if old, next := s.leaveQuietPath(&last); next != nil {
+			go s.resync(next, true)
+			s.pathFailed(old)
+		}
+	}
+}
+
+// leaveQuietPath makes the least quiet other path active if the active one
+// has been quiet for SwitchAfter, at most once per SwitchAfter so marginal
+// paths cannot make the session flap. It returns the old and the new path, or
+// nils if it did not switch.
+func (s *Session) leaveQuietPath(last *time.Time) (old, next *pathState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.active == nil || time.Since(*last) < s.cfg.SwitchAfter {
+		return nil, nil
+	}
+	q, ok := s.active.p.(QuietPath)
+	if !ok || q.Quiet() < s.cfg.SwitchAfter {
+		return nil, nil
+	}
+	var best *pathState
+	bestQuiet := s.cfg.SwitchAfter
+	for _, ps := range s.paths {
+		if ps == s.active {
+			continue
+		}
+		if pq, ok := ps.p.(QuietPath); ok {
+			if d := pq.Quiet(); d < bestQuiet {
+				best, bestQuiet = ps, d
+			}
+		}
+	}
+	if best == nil {
+		return nil, nil
+	}
+	old = s.active
+	s.active = best
+	*last = time.Now()
+	return old, best
 }

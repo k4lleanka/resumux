@@ -520,3 +520,86 @@ func TestSparePathDoesNotMoveFollower(t *testing.T) {
 		t.Errorf("%d MiB on the wire for %d MiB of data", w>>20, total>>20)
 	}
 }
+
+// quietMemPath is a memPath whose quietness a test sets.
+type quietMemPath struct {
+	*memPath
+	quiet atomic.Int64
+}
+
+func (p *quietMemPath) Quiet() time.Duration { return time.Duration(p.quiet.Load()) }
+
+func isClosed(p *memPath) bool {
+	select {
+	case <-p.dead:
+		return true
+	default:
+		return false
+	}
+}
+
+// TestLeaderLeavesQuietPathOnlyForAHealthyOne checks that a leader stays on
+// a quiet path while every other path is quiet too, and moves, dropping the
+// quiet path, as soon as another is heard from.
+func TestLeaderLeavesQuietPathOnlyForAHealthyOne(t *testing.T) {
+	const switchAfter = 100 * time.Millisecond
+	leader := New(Config{SwitchAfter: switchAfter})
+	follower := New(Config{FollowPeer: true})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	a1, a2 := memPair()
+	b1, b2 := memPair()
+	qa, qb := &quietMemPath{memPath: a1}, &quietMemPath{memPath: b1}
+	leader.AddPath(qa)
+	leader.AddPath(qb)
+	follower.AddPath(a2)
+	follower.AddPath(b2)
+
+	qa.quiet.Store(int64(time.Hour))
+	qb.quiet.Store(int64(time.Hour))
+	time.Sleep(5 * switchAfter)
+	if isClosed(a1) || isClosed(b1) {
+		t.Fatal("left a quiet path for another quiet one")
+	}
+
+	qb.quiet.Store(0)
+	deadline := time.Now().Add(5 * time.Second)
+	for !isClosed(a1) {
+		if time.Now().After(deadline) {
+			t.Fatal("stayed on a quiet path next to a healthy one")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if isClosed(b1) {
+		t.Fatal("dropped the healthy path")
+	}
+
+	// The session must carry on over the remaining path.
+	msg := []byte("still here")
+	if _, err := leader.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(follower, got); err != nil || !bytes.Equal(got, msg) {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// TestFollowerNeverLeavesQuietPath checks that only the leader acts on
+// quietness; a follower doing so could fight the leader's choice.
+func TestFollowerNeverLeavesQuietPath(t *testing.T) {
+	const switchAfter = 50 * time.Millisecond
+	follower := New(Config{FollowPeer: true, SwitchAfter: switchAfter})
+	defer follower.Abort(nil)
+	a1, _ := memPair()
+	b1, _ := memPair()
+	qa, qb := &quietMemPath{memPath: a1}, &quietMemPath{memPath: b1}
+	qa.quiet.Store(int64(time.Hour))
+	follower.AddPath(qa)
+	follower.AddPath(qb)
+	time.Sleep(10 * switchAfter)
+	if isClosed(a1) {
+		t.Fatal("follower dropped a quiet path")
+	}
+}
