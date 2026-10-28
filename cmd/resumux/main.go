@@ -1,0 +1,240 @@
+// Command resumux forwards TCP connections over resumable WebSocket sessions.
+//
+//	resumux server -listen :8080 -target 127.0.0.1:22 -token-file token
+//	resumux client -listen 127.0.0.1:2222 -server wss://example.com/ -token-file token
+//
+// Every flag can also be given in a JSON file passed with -config, using the
+// flag names as keys. Flags on the command line win over the file.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/k4lleanka/resumux/tunnel"
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+	log.SetPrefix("resumux: ")
+
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	var err error
+	switch os.Args[1] {
+	case "server":
+		err = runServer(os.Args[2:])
+	case "client":
+		err = runClient(os.Args[2:])
+	case "-h", "-help", "--help", "help":
+		usage()
+		return
+	default:
+		usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, `usage:
+  resumux server [flags]   accept tunnels and forward them to a target
+  resumux client [flags]   forward local connections through a server
+
+Run "resumux server -h" or "resumux client -h" for flags.`)
+}
+
+// loadConfig applies a JSON config file to every flag not set on the command
+// line.
+func loadConfig(fs *flag.FlagSet, path string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var values map[string]any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	for k, v := range values {
+		if k == "config" {
+			return fmt.Errorf("%s: config files cannot include each other", path)
+		}
+		if fs.Lookup(k) == nil {
+			return fmt.Errorf("%s: unknown setting %q", path, k)
+		}
+		if set[k] {
+			continue
+		}
+		if err := fs.Set(k, fmt.Sprint(v)); err != nil {
+			return fmt.Errorf("%s: %s: %w", path, k, err)
+		}
+	}
+	return nil
+}
+
+// readToken reads the shared token from a file, or from RESUMUX_TOKEN. It is
+// deliberately not a flag: command lines are visible to other users.
+func readToken(file string) (string, error) {
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		tok := strings.TrimSpace(string(b))
+		if tok == "" {
+			return "", fmt.Errorf("%s is empty", file)
+		}
+		return tok, nil
+	}
+	if tok := os.Getenv("RESUMUX_TOKEN"); tok != "" {
+		return tok, nil
+	}
+	return "", errors.New("no token: use -token-file or set RESUMUX_TOKEN")
+}
+
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+func runServer(args []string) error {
+	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	config := fs.String("config", "", "JSON file with settings")
+	listen := fs.String("listen", ":8080", "address to accept WebSocket connections on")
+	path := fs.String("path", "/", "HTTP path that accepts tunnels")
+	target := fs.String("target", "", "host:port every session is forwarded to (required)")
+	tokenFile := fs.String("token-file", "", "file with the shared token (or set RESUMUX_TOKEN)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate file; serves plain HTTP if empty")
+	tlsKey := fs.String("tls-key", "", "TLS key file")
+	maxSessions := fs.Int("max-sessions", 1024, "maximum concurrent sessions")
+	maxPaths := fs.Int("max-paths", 8, "maximum paths per session")
+	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long a session without paths is kept")
+	fs.Parse(args)
+	if err := loadConfig(fs, *config); err != nil {
+		return err
+	}
+	if *target == "" {
+		return errors.New("-target is required")
+	}
+	if !strings.HasPrefix(*path, "/") {
+		return fmt.Errorf("-path must start with /, got %q", *path)
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		return errors.New("-tls-cert and -tls-key must be given together")
+	}
+	token, err := readToken(*tokenFile)
+	if err != nil {
+		return err
+	}
+
+	sv, err := tunnel.NewServer(tunnel.ServerConfig{
+		Token:              token,
+		Target:             *target,
+		MaxSessions:        *maxSessions,
+		MaxPathsPerSession: *maxPaths,
+		ResumeTimeout:      *resume,
+	})
+	if err != nil {
+		return err
+	}
+	mux := http.NewServeMux()
+	mux.Handle(*path, sv)
+	hs := &http.Server{
+		Addr:              *listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	ctx, stop := signalContext()
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		sv.Close()
+		hs.Close()
+	}()
+
+	log.Printf("server listening on %s%s, forwarding to %s", *listen, *path, *target)
+	if *tlsCert != "" {
+		err = hs.ListenAndServeTLS(*tlsCert, *tlsKey)
+	} else {
+		err = hs.ListenAndServe()
+	}
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func runClient(args []string) error {
+	fs := flag.NewFlagSet("client", flag.ExitOnError)
+	config := fs.String("config", "", "JSON file with settings")
+	listen := fs.String("listen", "", "local address to accept connections on (required)")
+	server := fs.String("server", "", "server URL, e.g. wss://example.com/ (required)")
+	tokenFile := fs.String("token-file", "", "file with the shared token (or set RESUMUX_TOKEN)")
+	paths := fs.Int("paths", 2, "WebSocket paths kept open per session")
+	host := fs.String("host", "", "Host header to send, if it differs from the server URL")
+	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long to keep trying to resume a session")
+	fs.Parse(args)
+	if err := loadConfig(fs, *config); err != nil {
+		return err
+	}
+	if *listen == "" || *server == "" {
+		return errors.New("-listen and -server are required")
+	}
+	token, err := readToken(*tokenFile)
+	if err != nil {
+		return err
+	}
+
+	var header http.Header
+	if *host != "" {
+		header = http.Header{"Host": {*host}}
+	}
+	cl, err := tunnel.NewClient(tunnel.ClientConfig{
+		ServerURL:     *server,
+		Token:         token,
+		Paths:         *paths,
+		ResumeTimeout: *resume,
+		Header:        header,
+	})
+	if err != nil {
+		return err
+	}
+	l, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signalContext()
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		l.Close()
+	}()
+
+	log.Printf("client listening on %s, tunneling to %s", l.Addr(), *server)
+	err = cl.Serve(l)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
