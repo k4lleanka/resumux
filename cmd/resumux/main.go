@@ -162,6 +162,7 @@ func runServer(args []string) error {
 	clientIPHeader := fs.String("client-ip-header", "", "header in which trusted proxies name the client, e.g. CF-Connecting-IP")
 	perClient := fs.Int("max-sessions-per-client", 0, "sessions one client address may hold at once (0: no limit)")
 	newPerClient := fs.Int("max-new-sessions-per-client", 0, "sessions one client address may open per minute (0: no limit)")
+	refuseRedundant := fs.Bool("refuse-redundant", false, "give clients that ask for -redundant plain sessions instead")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -208,6 +209,7 @@ func runServer(args []string) error {
 		ClientIPHeader:          *clientIPHeader,
 		MaxSessionsPerClient:    *perClient,
 		MaxNewSessionsPerClient: *newPerClient,
+		RefuseRedundant:         *refuseRedundant,
 	})
 	if err != nil {
 		return err
@@ -254,6 +256,7 @@ func runClient(args []string) error {
 	caFile := fs.String("ca-file", "", "PEM file with CA certificates to trust instead of the system ones")
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long to keep trying to resume a session")
 	deadAfter := fs.Duration("dead-after", 5*time.Second, "how long a path may stay silent before the session moves off it")
+	redundant := fs.Bool("redundant", false, "send small packets on two paths at once, so a lost or stalled packet does not freeze the stream (for games; uses more bandwidth)")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -289,6 +292,7 @@ func runClient(args []string) error {
 		Path:          pathOptions(*deadAfter),
 		Header:        header,
 		Dialer:        dialer,
+		Redundant:     *redundant,
 	})
 	if err != nil {
 		return err

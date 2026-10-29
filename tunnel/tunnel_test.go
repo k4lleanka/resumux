@@ -192,9 +192,11 @@ func TestEcho(t *testing.T) {
 
 // TestPathsCutDuringTransfer cuts WebSocket connections on the server side
 // while data flows. The TCP connection through the tunnel must not notice.
-func TestPathsCutDuringTransfer(t *testing.T) {
+func TestPathsCutDuringTransfer(t *testing.T) { bothModes(t, pathsCutDuringTransfer) }
+
+func pathsCutDuringTransfer(t *testing.T, redundant bool) {
 	h := startServer(t, ServerConfig{})
-	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Paths: 3})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Paths: 3, Redundant: redundant})
 
 	stop := make(chan struct{})
 	cuts := make(chan int, 1)
@@ -336,8 +338,12 @@ type writerFunc func([]byte) (int, error)
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
 func TestManyConnectionsWhilePathsAreCut(t *testing.T) {
+	bothModes(t, manyConnectionsWhilePathsAreCut)
+}
+
+func manyConnectionsWhilePathsAreCut(t *testing.T, redundant bool) {
 	h := startServer(t, ServerConfig{})
-	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Redundant: redundant})
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -388,14 +394,22 @@ func listenTarget(t testing.TB, handle func(*net.TCPConn)) string {
 
 // TestHalfClose checks that closing the client's write side reaches the
 // target as EOF while the reply can still flow back.
-func TestHalfClose(t *testing.T) {
+// bothModes runs a test with and without redundant sessions.
+func bothModes(t *testing.T, test func(t *testing.T, redundant bool)) {
+	t.Run("plain", func(t *testing.T) { test(t, false) })
+	t.Run("redundant", func(t *testing.T) { test(t, true) })
+}
+
+func TestHalfClose(t *testing.T) { bothModes(t, halfClose) }
+
+func halfClose(t *testing.T, redundant bool) {
 	target := listenTarget(t, func(c *net.TCPConn) {
 		defer c.Close()
 		b, _ := io.ReadAll(c)
 		fmt.Fprintf(c, "got %d bytes", len(b))
 	})
 	h := startServer(t, ServerConfig{Target: target})
-	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Redundant: redundant})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -417,13 +431,15 @@ func TestHalfClose(t *testing.T) {
 // TestTargetClosesFirst checks that a target hanging up reaches the client as
 // EOF, and that the session is freed once the client closes too. Until then
 // the client may still be sending, exactly as with a direct TCP connection.
-func TestTargetClosesFirst(t *testing.T) {
+func TestTargetClosesFirst(t *testing.T) { bothModes(t, targetClosesFirst) }
+
+func targetClosesFirst(t *testing.T, redundant bool) {
 	target := listenTarget(t, func(c *net.TCPConn) {
 		c.Write([]byte("bye"))
 		c.Close()
 	})
 	h := startServer(t, ServerConfig{Target: target})
-	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Redundant: redundant})
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -684,7 +700,7 @@ func (l *freezingListener) Accept() (net.Conn, error) {
 // second path is healthy. The session must move to the healthy path within a
 // few seconds, not wait for a long keepalive timeout.
 func TestSilentPathFailsOverQuickly(t *testing.T) {
-	fl, addr := startFreezable(t)
+	fl, addr := startFreezable(t, false)
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -717,8 +733,9 @@ func TestSilentPathFailsOverQuickly(t *testing.T) {
 }
 
 // startFreezable starts a server whose connections can be frozen, and a
-// client for it, and returns the listener and the client's address.
-func startFreezable(t *testing.T) (*freezingListener, string) {
+// client for it, redundant if asked, and returns the listener and the
+// client's address.
+func startFreezable(t *testing.T, redundant bool) (*freezingListener, string) {
 	t.Helper()
 	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: testLogger(t, "server: ")})
 	if err != nil {
@@ -732,7 +749,7 @@ func startFreezable(t *testing.T) (*freezingListener, string) {
 		sv.Close()
 		hs.Close()
 	})
-	return fl, startClient(t, ClientConfig{ServerURLs: []string{"ws" + strings.TrimPrefix(hs.URL, "http")}})
+	return fl, startClient(t, ClientConfig{ServerURLs: []string{"ws" + strings.TrimPrefix(hs.URL, "http")}, Redundant: redundant})
 }
 
 // freezeFirst waits for a second path, then freezes the first, which is the
@@ -758,7 +775,7 @@ func (l *freezingListener) freezeFirst(t *testing.T) {
 // TestSilentPathDuringTransfer freezes the active path in the middle of a
 // transfer. Every byte must still arrive once and in order.
 func TestSilentPathDuringTransfer(t *testing.T) {
-	fl, addr := startFreezable(t)
+	fl, addr := startFreezable(t, false)
 	data := randomData(t, 8<<20)
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -1033,5 +1050,75 @@ func TestIdleSessionKeepsItsPaths(t *testing.T) {
 	echoOn(t, c, "still here")
 	if n := accepted.Load(); n != 2 {
 		t.Fatalf("an idle session with 2 paths made %d handshakes, want 2", n)
+	}
+}
+
+// TestRedundantHidesSilentPath freezes the path both sides send on. A
+// redundant session must not wait to move off it: the copies on the other
+// path carry the stream in both directions meanwhile.
+func TestRedundantHidesSilentPath(t *testing.T) {
+	fl, addr := startFreezable(t, true)
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	var worst time.Duration
+	echo := func(msg string) {
+		t.Helper()
+		start := time.Now()
+		if _, err := c.Write([]byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(msg))
+		if _, err := io.ReadFull(c, got); err != nil || string(got) != msg {
+			t.Fatalf("got %q, %v", got, err)
+		}
+		worst = max(worst, time.Since(start))
+	}
+	echo("before")
+	fl.freezeFirst(t)
+	worst = 0
+	for i := range 300 {
+		echo(fmt.Sprintf("message %d", i))
+		time.Sleep(10 * time.Millisecond)
+	}
+	if worst > 300*time.Millisecond {
+		t.Fatalf("worst round trip %s with the active path frozen", worst.Round(time.Millisecond))
+	}
+	t.Logf("worst round trip %s with the active path frozen", worst.Round(time.Millisecond))
+}
+
+// TestRedundantHandshake checks that the server agrees to a redundant session
+// only when asked, and never when told to refuse.
+func TestRedundantHandshake(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		ask, refuse   bool
+		wantRedundant bool
+	}{
+		{"asked", true, false, true},
+		{"not asked", false, false, false},
+		{"refused", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startServer(t, ServerConfig{RefuseRedundant: tc.refuse})
+			hdr := http.Header{}
+			hdr.Set("Authorization", "Bearer "+testToken)
+			hdr.Set(headerVersion, protocolVersion)
+			if tc.ask {
+				hdr.Set(headerRedundant, "1")
+			}
+			c, resp, err := websocket.DefaultDialer.Dial(h.url, hdr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Close()
+			if got := resp.Header.Get(headerRedundant) == "1"; got != tc.wantRedundant {
+				t.Fatalf("server agreed to redundancy: %v, want %v", got, tc.wantRedundant)
+			}
+		})
 	}
 }

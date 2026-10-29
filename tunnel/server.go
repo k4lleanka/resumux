@@ -50,6 +50,9 @@ type ServerConfig struct {
 	// session, nor to loopback or trusted proxy addresses, which stand for
 	// many clients.
 	MaxNewSessionsPerClient int
+	// RefuseRedundant turns down clients that ask for redundant sessions, which
+	// can double the traffic the server sends. They get plain sessions.
+	RefuseRedundant bool
 
 	Path    wspath.Options
 	Session session.Config
@@ -79,6 +82,7 @@ func (c ServerConfig) withDefaults() ServerConfig {
 	}
 	// The client picks the path; the server follows it.
 	c.Session.FollowPeer = true
+	c.Session.Redundant = false
 	return c
 }
 
@@ -256,7 +260,9 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 
 	// Registered before the client learns the id: it may resume on a second
 	// path the moment the handshake response arrives.
-	s := session.New(sv.cfg.Session)
+	cfg := sv.cfg.Session
+	cfg.Redundant = !sv.cfg.RefuseRedundant && r.Header.Get(headerRedundant) == "1"
+	s := session.New(cfg)
 	ss := &serverSession{secret: secret, s: s}
 	sv.mu.Lock()
 	// Checked again: the target dial above can take seconds, and other
@@ -273,6 +279,9 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	h := http.Header{}
 	h.Set(headerSession, id)
 	h.Set(headerSecret, secret)
+	if cfg.Redundant {
+		h.Set(headerRedundant, "1")
+	}
 	c, err := sv.upgrader.Upgrade(w, r, h)
 	if err != nil {
 		sv.mu.Lock()

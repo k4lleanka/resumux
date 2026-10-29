@@ -24,6 +24,8 @@ const (
 	headerVersion = "Resumux-Version"
 	headerSession = "Resumux-Session"
 	headerSecret  = "Resumux-Secret"
+	// headerRedundant asks for, and confirms, a redundant session.
+	headerRedundant = "Resumux-Redundant"
 
 	protocolVersion = "1"
 )

@@ -1,0 +1,279 @@
+package session
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// holdPair is a memPair that delivers nothing, in either direction, while
+// hold is set, and then everything it kept back in order: a TCP connection
+// waiting out a retransmission timeout.
+func holdPair(hold *atomic.Bool, wire *atomic.Int64) (*memPath, *memPath) {
+	once := new(sync.Once)
+	dead := make(chan struct{})
+	link := func() (chan []byte, chan []byte) {
+		w, r := make(chan []byte, 1024), make(chan []byte, 1024)
+		go func() {
+			for b := range w {
+				wire.Add(int64(len(b)))
+				for hold.Load() {
+					select {
+					case <-dead:
+						return
+					case <-time.After(time.Millisecond):
+					}
+				}
+				select {
+				case r <- b:
+				case <-dead:
+					return
+				}
+			}
+		}()
+		return w, r
+	}
+	aw, br := link()
+	bw, ar := link()
+	return &memPath{in: ar, out: aw, once: once, dead: dead},
+		&memPath{in: br, out: bw, once: once, dead: dead}
+}
+
+// worstEcho sends messages from the leader, has the follower echo them,
+// and holds up the path both sides send on for a while in the middle. It
+// returns the slowest round trip.
+func worstEcho(t *testing.T, redundant bool, size, count int) time.Duration {
+	t.Helper()
+	leader := New(Config{Redundant: redundant})
+	follower := New(Config{FollowPeer: true, Redundant: redundant})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var hold1, hold2 atomic.Bool
+	var wire atomic.Int64
+	a1, b1 := holdPair(&hold1, &wire)
+	a2, b2 := holdPair(&hold2, &wire)
+	leader.AddPath(a1)
+	leader.AddPath(a2)
+	follower.AddPath(b1)
+	follower.AddPath(b2)
+
+	go func() {
+		msg := make([]byte, size)
+		for {
+			if _, err := io.ReadFull(follower, msg); err != nil {
+				return
+			}
+			if _, err := follower.Write(msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	var worst time.Duration
+	msg, back := make([]byte, size), make([]byte, size)
+	for i := range count {
+		if i == count/3 {
+			hold1.Store(true)
+			time.AfterFunc(300*time.Millisecond, func() { hold1.Store(false) })
+		}
+		copy(msg, fmt.Sprintf("message %d", i))
+		start := time.Now()
+		if _, err := leader.Write(msg); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(leader, back); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(back, msg) {
+			t.Fatalf("message %d came back as %q", i, back)
+		}
+		worst = max(worst, time.Since(start))
+		time.Sleep(2 * time.Millisecond)
+	}
+	return worst
+}
+
+// TestRedundantHidesStalledPath holds up the path both sides send on. A plain
+// session waits for it; a redundant one carries on over the other path.
+func TestRedundantHidesStalledPath(t *testing.T) {
+	if d := worstEcho(t, false, 32, 300); d < 250*time.Millisecond {
+		t.Fatalf("plain session: worst round trip %s, want the stall to show", d)
+	}
+	if d := worstEcho(t, true, 32, 300); d > 150*time.Millisecond {
+		t.Errorf("redundant session: worst round trip %s, want the stall hidden", d)
+	}
+}
+
+// TestRedundantHidesStalledPathAtHighRate does the same with enough traffic to
+// pass copyBudget within the stall, unless acknowledgements are copied too.
+func TestRedundantHidesStalledPathAtHighRate(t *testing.T) {
+	if d := worstEcho(t, true, 4<<10, 300); d > 150*time.Millisecond {
+		t.Errorf("worst round trip %s, want the stall hidden", d)
+	}
+}
+
+// TestRedundantBulkIsSentOnce sends far more than copyBudget, each way. Only
+// the start may be copied.
+func TestRedundantBulkIsSentOnce(t *testing.T) {
+	leader := New(Config{Redundant: true})
+	follower := New(Config{FollowPeer: true, Redundant: true})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var wire atomic.Int64
+	a1, b1 := slowPair(time.Millisecond, &wire)
+	a2, b2 := slowPair(time.Millisecond, &wire)
+	leader.AddPath(a1)
+	leader.AddPath(a2)
+	follower.AddPath(b1)
+	follower.AddPath(b2)
+
+	const total = 16 << 20
+	for _, tc := range []struct {
+		name     string
+		from, to *Session
+	}{{"leader to follower", leader, follower}, {"follower to leader", follower, leader}} {
+		wire.Store(0)
+		want := randomBytes(t, total)
+		errc := make(chan error, 1)
+		go func() {
+			_, err := tc.from.Write(want)
+			errc <- err
+		}()
+		got := make([]byte, total)
+		done := make(chan error, 1)
+		go func() {
+			_, err := io.ReadFull(tc.to, got)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s: transfer did not finish", tc.name)
+		}
+		if err := <-errc; err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s: contents differ", tc.name)
+		}
+		if w := wire.Load(); w > total+total/8 {
+			t.Errorf("%s: %d MiB on the wire for %d MiB of data", tc.name, w>>20, total>>20)
+		}
+	}
+}
+
+// TestRedundantCopiesDoNotMoveFollower has the follower send in bulk while the
+// leader sends small, copied messages. A copy that arrives first on the spare
+// path must not move the follower there, or every one would make it resend
+// its whole window.
+func TestRedundantCopiesDoNotMoveFollower(t *testing.T) {
+	leader := New(Config{Redundant: true})
+	follower := New(Config{FollowPeer: true, Redundant: true})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var wire atomic.Int64
+	a1, b1 := slowPair(time.Millisecond, &wire)
+	a2, b2 := slowPair(0, &wire)
+	leader.AddPath(a1)
+	leader.AddPath(a2)
+	follower.AddPath(b1)
+	follower.AddPath(b2)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			if _, err := leader.Write([]byte("tick")); err != nil {
+				return
+			}
+		}
+	}()
+	go io.Copy(io.Discard, follower)
+
+	const total = 16 << 20
+	errc := make(chan error, 1)
+	go func() {
+		_, err := follower.Write(make([]byte, total))
+		errc <- err
+	}()
+	got := make([]byte, total)
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(leader, got)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("transfer did not finish, %d MiB on the wire", wire.Load()>>20)
+	}
+	if w := wire.Load(); w > total+total/4 {
+		t.Errorf("%d MiB on the wire for %d MiB of data", w>>20, total>>20)
+	}
+}
+
+// TestRedundantNewPathGetsUnackedCopies sends while only a stalled path
+// exists. A second path attached after that must get copies of what is
+// still unacknowledged, not only of what is sent later.
+func TestRedundantNewPathGetsUnackedCopies(t *testing.T) {
+	leader := New(Config{Redundant: true})
+	follower := New(Config{FollowPeer: true, Redundant: true})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var hold1, hold2 atomic.Bool
+	var wire atomic.Int64
+	a1, b1 := holdPair(&hold1, &wire)
+	leader.AddPath(a1)
+	follower.AddPath(b1)
+	hold1.Store(true)
+	if _, err := leader.Write([]byte("sent before the spare")); err != nil {
+		t.Fatal(err)
+	}
+
+	a2, b2 := holdPair(&hold2, &wire)
+	follower.AddPath(b2)
+	leader.AddPath(a2)
+	got := make([]byte, len("sent before the spare"))
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(follower, got)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil || string(got) != "sent before the spare" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("frame sent before the spare path stayed behind the stalled one")
+	}
+}
+
+func TestDecodeCopy(t *testing.T) {
+	f, err := decodeFrame(encodeFrame(frameData|copyFlag, 7, []byte("x")))
+	if err != nil || !f.copy || f.kind != frameData || f.seq != 7 || string(f.payload) != "x" {
+		t.Fatalf("decoded copy as %+v, %v", f, err)
+	}
+	if f, err := decodeFrame(encodeFrame(frameAck|copyFlag, 7, nil)); err != nil || !f.copy || f.kind != frameAck {
+		t.Errorf("decoded copied acknowledgement as %+v, %v", f, err)
+	}
+}

@@ -21,6 +21,7 @@ sends:
 | `Resumux-Version` | `1` |
 | `Resumux-Session` | session id, only when joining an existing session |
 | `Resumux-Secret` | session secret, only when joining an existing session |
+| `Resumux-Redundant` | `1`, only when creating a session, to ask for a redundant one |
 
 Without `Resumux-Session` the server creates a session. It connects to its
 target first, then answers `101 Switching Protocols` with:
@@ -29,6 +30,7 @@ target first, then answers `101 Switching Protocols` with:
 |---|---|
 | `Resumux-Session` | 32 hex characters, 128 random bits |
 | `Resumux-Secret` | 64 hex characters, 256 random bits |
+| `Resumux-Redundant` | `1` if the client asked for a redundant session and the server agrees |
 
 The server registers the session before it sends this response, so the client
 may open further paths as soon as it arrives.
@@ -70,6 +72,10 @@ FIN   0x02 | seq (8 bytes)
 ACK   0x03 | next (8 bytes)
 ```
 
+In a redundant session, frames may also come as copies, with the high bit of
+the type set: `0x81`, `0x82` and `0x83`. A copy means the same as the
+original.
+
 Senders never send a DATA frame with an empty payload; receivers accept one
 and treat it as already read.
 
@@ -109,15 +115,15 @@ of them again, in order, on a path when:
 
 - that path becomes the one it sends on, after the previous one failed, or
 - it is the first path of a session that had none, or
-- on the server only: frames start arriving from the client on a different
-  path than before. The client moved for a reason, so whatever was sent on
+- on the server only: frames other than copies start arriving from the
+  client on a different path than before. The client moved for a reason, so whatever was sent on
   the old path may be lost.
 
 The client chooses the path and the server follows it. Each side fails over
 to a path of its own choosing, and their choices can differ. If both followed
 each other they could keep swapping paths, resending everything each time.
-For the same reason the client sends nothing on a spare path until it starts
-using it. A path that stops delivering only toward the client is left once
+For the same reason the client sends nothing but copies on a spare path
+until it starts using it. A path that stops delivering only toward the client is left once
 the client notices the silence, as described under Liveness.
 
 When the server adds a path, and when the client adds the path it will send
@@ -127,6 +133,25 @@ drop what is already delivered.
 Sending too much is harmless, because duplicates are dropped by sequence
 number. Sending too little is impossible as long as unacknowledged frames are
 kept.
+
+### Redundant sessions
+
+In a redundant session both sides send a copy of each DATA and FIN frame on a
+second path, as long as at most 64 KiB is unacknowledged, and a copy of every
+ACK, so that a stalled path does not hold back acknowledgements and push
+unacknowledged data past that limit. A frame that one path loses or holds
+up, as TCP does for a few hundred milliseconds when a packet is lost, still
+arrives on time over the other. Bulk transfers pass the limit at once and
+are then sent only once. A path added to the session also gets copies of
+what is unacknowledged at that moment.
+
+A server may refuse redundancy by leaving `Resumux-Redundant` out of its
+answer; the session is then a plain one on both sides.
+
+Copies are optional: a sender may drop one, for example when the path is
+behind, since the original is kept for retransmission like any frame. The
+receiver drops whichever copy arrives second as a duplicate, and the server
+does not follow the client to a path because a copy arrived there.
 
 ## Windows
 

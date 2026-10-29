@@ -58,6 +58,10 @@ type Config struct {
 	// applies to QuietPaths, and must exceed their keepalive interval plus a
 	// round trip, or idle paths would look quiet.
 	SwitchAfter time.Duration
+	// Redundant also sends each frame on a second path while little is in
+	// flight, so a frame that a path loses or holds up still arrives on time
+	// over the other. Set it on both sides.
+	Redundant bool
 }
 
 func (c Config) withDefaults() Config {
@@ -97,6 +101,15 @@ const frameCost = 64
 
 func cost(payload []byte) int { return len(payload) + frameCost }
 
+// copyBudget is how much may be unacknowledged for a redundant session to
+// still copy a frame. Interactive traffic stays far below it; bulk transfers
+// pass it at once and are then sent only once.
+const copyBudget = 64 << 10
+
+// copyQueue is how many copies may wait for a path. Copies beyond it are
+// dropped, so a stalled path never holds up the writer.
+const copyQueue = 64
+
 type sentFrame struct {
 	seq     uint64
 	kind    byte
@@ -110,9 +123,14 @@ type recvItem struct {
 }
 
 type pathState struct {
-	p    Path
-	wmu  sync.Mutex
-	dead bool
+	p      Path
+	wmu    sync.Mutex
+	dead   bool
+	gone   chan struct{} // closed when dead is set
+	copies chan []byte
+	// draining is set, under wmu, once the path is half-closed; nothing may
+	// be written on it after that.
+	draining bool
 }
 
 // Session is a reliable byte stream over a changing set of paths.
@@ -190,7 +208,11 @@ func (s *Session) AddPath(p Path) error {
 		p.Close()
 		return ErrClosed
 	}
-	ps := &pathState{p: p}
+	ps := &pathState{p: p, gone: make(chan struct{})}
+	if s.cfg.Redundant {
+		ps.copies = make(chan []byte, copyQueue)
+		go s.copyLoop(ps)
+	}
 	s.paths = append(s.paths, ps)
 	becameActive := s.active == nil
 	if becameActive {
@@ -204,7 +226,27 @@ func (s *Session) AddPath(p Path) error {
 	if becameActive || s.cfg.FollowPeer {
 		go s.resync(ps, becameActive)
 	}
+	if !becameActive {
+		s.copyUnacked(ps)
+	}
 	return nil
+}
+
+// copyUnacked gives a new spare path copies of what is still unacknowledged,
+// so frames sent while it was missing are as safe as those sent after.
+func (s *Session) copyUnacked(ps *pathState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.cfg.Redundant || s.unackedBytes > copyBudget {
+		return
+	}
+	for _, f := range s.unacked {
+		select {
+		case ps.copies <- encodeFrame(f.kind|copyFlag, f.seq, f.payload):
+		default:
+			return
+		}
+	}
 }
 
 // Write sends b, blocking while the send window is full.
@@ -232,8 +274,11 @@ func (s *Session) Write(b []byte) (int, error) {
 		payload := append([]byte(nil), chunk...)
 		enc := s.enqueueLocked(frameData, payload)
 		ps := s.active
+		cp := s.copyPathLocked()
 		s.mu.Unlock()
 
+		// The copy goes first: the original may block on a stalled path.
+		s.sendCopy(cp, enc)
 		if ps != nil {
 			s.send(ps, enc)
 		}
@@ -308,9 +353,11 @@ func (s *Session) CloseWrite() error {
 	s.writeClosed = true
 	enc := s.enqueueLocked(frameFin, nil)
 	ps := s.active
+	cp := s.copyPathLocked()
 	s.writeCond.Broadcast()
 	s.mu.Unlock()
 
+	s.sendCopy(cp, enc)
 	if ps != nil {
 		s.send(ps, enc)
 	}
@@ -370,10 +417,51 @@ func (s *Session) Abort(err error) {
 
 func (s *Session) send(ps *pathState, enc []byte) {
 	ps.wmu.Lock()
+	if ps.draining {
+		ps.wmu.Unlock()
+		return
+	}
 	err := ps.p.WriteFrame(enc)
 	ps.wmu.Unlock()
 	if err != nil {
 		s.pathFailed(ps)
+	}
+}
+
+// copyPathLocked returns the path a redundant session copies the frame just
+// queued to, or nil if it should be sent only once.
+func (s *Session) copyPathLocked() *pathState {
+	if !s.cfg.Redundant || s.active == nil || s.unackedBytes > copyBudget {
+		return nil
+	}
+	ps, _ := s.leastQuietLocked(s.active)
+	return ps
+}
+
+// sendCopy queues a copy of enc for ps, or drops it if ps is behind. The
+// original stays queued for retransmission, so a dropped copy loses nothing.
+func (s *Session) sendCopy(ps *pathState, enc []byte) {
+	if ps == nil {
+		return
+	}
+	c := append([]byte(nil), enc...)
+	c[0] |= copyFlag
+	select {
+	case ps.copies <- c:
+	default:
+	}
+}
+
+func (s *Session) copyLoop(ps *pathState) {
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ps.gone:
+			return
+		case c := <-ps.copies:
+			s.send(ps, c)
+		}
 	}
 }
 
@@ -394,6 +482,9 @@ func (s *Session) resync(ps *pathState, retransmit bool) {
 
 	ps.wmu.Lock()
 	defer ps.wmu.Unlock()
+	if ps.draining {
+		return
+	}
 	if err := ps.p.WriteFrame(ack); err != nil {
 		go s.pathFailed(ps)
 		return
@@ -415,6 +506,7 @@ func (s *Session) pathFailed(ps *pathState) {
 		return
 	}
 	ps.dead = true
+	close(ps.gone)
 	for i, q := range s.paths {
 		if q == ps {
 			s.paths = append(s.paths[:i:i], s.paths[i+1:]...)
@@ -462,7 +554,7 @@ func (s *Session) handle(ps *pathState, f frame) {
 	// Only one side may follow: if both did after picking different paths,
 	// each would chase the other forever, resending everything every time.
 	switched := false
-	if s.cfg.FollowPeer && s.active != ps {
+	if s.cfg.FollowPeer && s.active != ps && !f.copy {
 		s.active = ps
 		switched = true
 	}
@@ -567,7 +659,15 @@ func (s *Session) flushAck() {
 	}
 	enc := encodeFrame(frameAck, s.consumed, nil)
 	ps := s.active
+	// Acknowledgements are copied whatever is in flight: without them, a
+	// stalled path would let unacknowledged data pass copyBudget and end the
+	// copies just when they are needed.
+	var cp *pathState
+	if s.cfg.Redundant {
+		cp, _ = s.leastQuietLocked(ps)
+	}
 	s.mu.Unlock()
+	s.sendCopy(cp, enc)
 	s.send(ps, enc)
 }
 
@@ -708,6 +808,7 @@ func (s *Session) drainPaths() {
 	for _, ps := range paths {
 		if hc, ok := ps.p.(interface{ CloseWrite() error }); ok {
 			ps.wmu.Lock()
+			ps.draining = true
 			hc.CloseWrite()
 			ps.wmu.Unlock()
 			half = true

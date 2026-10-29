@@ -129,8 +129,13 @@ func TestTransferWithoutFailures(t *testing.T) {
 // directions while data flows, attaching a fresh one each time. Every byte
 // must arrive once and in order.
 func TestPathsDieDuringTransfer(t *testing.T) {
-	a := New(Config{MaxFrameSize: 4 << 10, SendWindow: 256 << 10})
-	b := New(Config{MaxFrameSize: 4 << 10, SendWindow: 256 << 10})
+	t.Run("plain", func(t *testing.T) { pathsDieDuringTransfer(t, false) })
+	t.Run("redundant", func(t *testing.T) { pathsDieDuringTransfer(t, true) })
+}
+
+func pathsDieDuringTransfer(t *testing.T, redundant bool) {
+	cfg := Config{MaxFrameSize: 4 << 10, SendWindow: 256 << 10, Redundant: redundant}
+	a, b := New(cfg), New(cfg)
 	defer a.Abort(nil)
 	defer b.Abort(nil)
 
@@ -351,13 +356,18 @@ func FuzzDecodeFrame(f *testing.F) {
 	f.Add(encodeFrame(frameData, 7, []byte("hello")))
 	f.Add(encodeFrame(frameFin, 1, nil))
 	f.Add(encodeFrame(frameAck, 3, nil))
+	f.Add(encodeFrame(frameData|copyFlag, 7, []byte("hello")))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		fr, err := decodeFrame(b)
 		if err != nil {
 			return
 		}
-		if got := encodeFrame(fr.kind, fr.seq, fr.payload); !bytes.Equal(got, b) {
+		kind := fr.kind
+		if fr.copy {
+			kind |= copyFlag
+		}
+		if got := encodeFrame(kind, fr.seq, fr.payload); !bytes.Equal(got, b) {
 			t.Fatalf("decode then encode changed the frame: %x -> %x", b, got)
 		}
 	})
@@ -368,11 +378,15 @@ func FuzzDecodeFrame(f *testing.F) {
 func FuzzSessionInput(f *testing.F) {
 	f.Add(encodeFrame(frameData, 0, []byte("a")), encodeFrame(frameAck, 5, nil))
 	f.Add(encodeFrame(frameFin, 0, nil), []byte{0xff})
+	f.Add(encodeFrame(frameData|copyFlag, 0, []byte("a")), encodeFrame(frameFin|copyFlag, 1, nil))
 	f.Fuzz(func(t *testing.T, a, b []byte) {
-		s := New(Config{RecvWindow: 1 << 16})
+		// The lengths pick the mode, so every mode sees every input.
+		s := New(Config{RecvWindow: 1 << 16, Redundant: len(a)%2 == 1, FollowPeer: len(b)%2 == 1})
 		defer s.Abort(nil)
 		ours, theirs := memPair()
 		s.AddPath(ours)
+		spare, _ := memPair()
+		s.AddPath(spare)
 		go func() {
 			for {
 				if _, err := theirs.ReadFrame(); err != nil {

@@ -36,6 +36,13 @@ type ClientConfig struct {
 	// ResumeTimeout is how long a session may go without any path before the
 	// client gives up on it.
 	ResumeTimeout time.Duration
+	// Redundant asks the server to send each small frame on two paths, and
+	// does the same, so that a path that loses or holds up a frame does not
+	// stall the stream. Frames are copied while at most 64 KiB is
+	// unacknowledged, which covers interactive traffic, such as games, but
+	// also a moderate stream on a fast link: either may cost twice the
+	// bandwidth. Bulk transfers that keep more in flight are sent once.
+	Redundant bool
 	// Header is sent with every handshake, e.g. a Host override.
 	Header http.Header
 	// Dialer dials the WebSocket. websocket.DefaultDialer if nil.
@@ -63,6 +70,8 @@ func (c ClientConfig) withDefaults() ClientConfig {
 		c.Session.Linger = c.ResumeTimeout
 	}
 	c.Session.FollowPeer = false
+	// Set per session, once the server has agreed.
+	c.Session.Redundant = false
 	// An idle path is heard from about once per ping interval, plus a round
 	// trip, so it only counts as quiet once it has missed a whole answer: two
 	// intervals, and at least half a second more than one.
@@ -135,6 +144,8 @@ func (cl *Client) dial(ctx context.Context, url string, auth *sessionAuth) (*web
 	if auth != nil {
 		h.Set(headerSession, auth.id)
 		h.Set(headerSecret, auth.secret)
+	} else if cl.cfg.Redundant {
+		h.Set(headerRedundant, "1")
 	}
 	c, resp, err := cl.cfg.Dialer.DialContext(ctx, url, h)
 	if err != nil && resp != nil {
@@ -174,7 +185,9 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 	}
 	cl.cfg.Logger.Printf("session %s: opened for %s", auth.id[:8], local.RemoteAddr())
 
-	s := session.New(cl.cfg.Session)
+	cfg := cl.cfg.Session
+	cfg.Redundant = cl.cfg.Redundant && resp.Header.Get(headerRedundant) == "1"
+	s := session.New(cfg)
 	firstPath := wspath.New(first, cl.cfg.Path)
 	s.AddPath(firstPath)
 
