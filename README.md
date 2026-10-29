@@ -139,6 +139,9 @@ messages a second each way:
 
 Everything arrived in order. The cable pull took down the client and the
 server's Cloudflare connector at once, and the same session carried on.
+The messages sent during the outage, about a third of that run, waited
+and arrived when the network came back, up to 43 s late. The rest went
+through as usual, so the median stays at 26 ms.
 
 `-redundant`, with 16 sessions over an hour, half of them redundant, against
 a server on a VPS in France. Each sent ten 300-byte messages a second plus a
