@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -376,5 +377,120 @@ func TestRedundantCloseDoesNotWaitOutQueuedCopies(t *testing.T) {
 	}
 	if n := spare.writes.Load(); n > 2 {
 		t.Fatalf("%d copies written on the stalled path, want at most 2", n)
+	}
+}
+
+// TestRedundantFlappingPaths has every path keep switching between working
+// and stalled while data flows both ways, sometimes in a trickle that is
+// copied and sometimes in bursts that are not, and now and then replaces
+// a path outright. Every byte has to arrive once and in order, and no
+// path may hold more copies than the budget.
+func TestRedundantFlappingPaths(t *testing.T) {
+	leader := New(Config{Redundant: true, MaxFrameSize: 4 << 10, SendWindow: 256 << 10})
+	follower := New(Config{Redundant: true, FollowPeer: true, MaxFrameSize: 4 << 10, SendWindow: 256 << 10})
+	defer leader.Abort(nil)
+	defer follower.Abort(nil)
+
+	var wire atomic.Int64
+	holds := make([]*atomic.Bool, 3)
+	ends := make([]*memPath, 3)
+	for i := range holds {
+		holds[i] = new(atomic.Bool)
+		a, b := holdPair(holds[i], &wire)
+		leader.AddPath(a)
+		follower.AddPath(b)
+		ends[i] = a
+	}
+
+	var flaps atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Duration(1+mrand.IntN(4)) * time.Millisecond):
+			}
+			i := mrand.IntN(len(holds))
+			if mrand.IntN(10) == 0 {
+				// Replace the path, stalled or not, as a dead one would be.
+				ends[i].Close()
+				holds[i] = new(atomic.Bool)
+				a, b := holdPair(holds[i], &wire)
+				leader.AddPath(a)
+				follower.AddPath(b)
+				ends[i] = a
+				continue
+			}
+			holds[i].Store(!holds[i].Load())
+			flaps.Add(1)
+			for _, s := range []*Session{leader, follower} {
+				s.mu.Lock()
+				for _, ps := range s.paths {
+					if n := ps.copyBytes.Load(); n > copyBudget {
+						t.Errorf("%d bytes of copies queued, budget %d", n, copyBudget)
+					}
+				}
+				s.mu.Unlock()
+			}
+		}
+	}()
+
+	// Alternate between a trickle, which stays under copyBudget and is
+	// copied, and bursts, which pass it.
+	send := func(s *Session, data []byte, errc chan<- error) {
+		for len(data) > 0 {
+			n := 1 + mrand.IntN(512)
+			if mrand.IntN(8) == 0 {
+				n = 1 + mrand.IntN(64<<10)
+			}
+			n = min(n, len(data))
+			if _, err := s.Write(data[:n]); err != nil {
+				errc <- err
+				return
+			}
+			data = data[n:]
+			if mrand.IntN(2) == 0 {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		errc <- s.CloseWrite()
+	}
+	there, back := randomBytes(t, 4<<20), randomBytes(t, 4<<20)
+	errc := make(chan error, 4)
+	var gotThere, gotBack []byte
+	go send(leader, there, errc)
+	go send(follower, back, errc)
+	go readAll(follower, &gotThere, errc)
+	go readAll(leader, &gotBack, errc)
+
+	timeout := time.After(60 * time.Second)
+	for range 4 {
+		select {
+		case err := <-errc:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-timeout:
+			t.Fatalf("transfer did not finish\n%s\n%s", leader.debugState("leader"), follower.debugState("follower"))
+		}
+	}
+	close(stop)
+	wg.Wait()
+	for _, h := range holds {
+		h.Store(false)
+	}
+
+	if n := flaps.Load(); n < 100 {
+		t.Errorf("paths flapped only %d times", n)
+	}
+	if !bytes.Equal(gotThere, there) {
+		t.Errorf("leader->follower: got %d bytes, want %d, or contents differ", len(gotThere), len(there))
+	}
+	if !bytes.Equal(gotBack, back) {
+		t.Errorf("follower->leader: got %d bytes, want %d, or contents differ", len(gotBack), len(back))
 	}
 }
