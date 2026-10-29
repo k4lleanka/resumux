@@ -95,6 +95,8 @@ var (
 	ErrWriteClosed = errors.New("session: write side closed")
 	// ErrPeerOverrun means the peer sent more than the receive window allows.
 	ErrPeerOverrun = errors.New("session: peer exceeded the receive window")
+	// ErrBadAck means the peer acknowledged frames that were never sent.
+	ErrBadAck = errors.New("session: peer acknowledged frames never sent")
 )
 
 // frameCost is added to every frame's payload when windows are counted, so
@@ -593,7 +595,12 @@ func (s *Session) handle(ps *pathState, f frame) {
 	var err error
 	switch f.kind {
 	case frameAck:
-		s.ackLocked(f.seq)
+		// Trusting it would forget frames the peer never got.
+		if f.seq > s.nextSeq {
+			err = ErrBadAck
+		} else {
+			s.ackLocked(f.seq)
+		}
 	case frameData, frameFin:
 		err = s.receiveLocked(f)
 	}

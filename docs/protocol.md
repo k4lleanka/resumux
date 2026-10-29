@@ -98,7 +98,10 @@ sequence number below `next`. The sender may then forget those frames.
 Acknowledging only what has been read, not merely received, is what makes the
 send window double as flow control.
 
-ACKs are cumulative and may be delayed and batched. A receiver that gets a
+ACKs are cumulative and may be delayed and batched. An ACK lower than one
+already received changes nothing, so a late one from an old path is
+harmless. An ACK beyond the frames sent is a protocol error and ends the
+session. A receiver that gets a
 frame it already has re-sends its current ACK, since the sender evidently
 missed the last one.
 

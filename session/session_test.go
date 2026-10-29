@@ -352,6 +352,26 @@ func TestFrameFarAheadIsAborted(t *testing.T) {
 	waitAborted(t, s, ErrPeerOverrun)
 }
 
+// An acknowledgement of frames that were never sent would make the sender
+// forget data the peer does not have, so it ends the session. One for
+// everything sent so far is fine.
+func TestAckBeyondSentIsAborted(t *testing.T) {
+	s := New(Config{})
+	defer s.Abort(nil)
+	peer := hostilePeer(t, s)
+
+	s.Write([]byte("ab"))
+	peer.WriteFrame(encodeFrame(frameAck, 1, nil))
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-s.Done():
+		t.Fatal("valid acknowledgement ended the session")
+	default:
+	}
+	peer.WriteFrame(encodeFrame(frameAck, 2, nil))
+	waitAborted(t, s, ErrBadAck)
+}
+
 func FuzzDecodeFrame(f *testing.F) {
 	f.Add(encodeFrame(frameData, 7, []byte("hello")))
 	f.Add(encodeFrame(frameFin, 1, nil))
