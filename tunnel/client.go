@@ -36,7 +36,7 @@ type ClientConfig struct {
 	// ResumeTimeout is how long a session may go without any path before the
 	// client gives up on it.
 	ResumeTimeout time.Duration
-	// Redundant asks the server to send each small frame on two paths, and
+	// Redundant asks the server to send each frame on two paths, and
 	// does the same, so that a path that loses or holds up a frame does not
 	// stall the stream. Frames are copied while at most 64 KiB is
 	// unacknowledged, which covers interactive traffic, such as games, but

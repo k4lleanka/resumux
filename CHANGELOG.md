@@ -24,3 +24,8 @@ First version.
 - A refused handshake reports the server's reason, such as which limit was
   hit.
 - `flakyproxy -delay -jitter -hiccup-every` imitates a long, lossy route.
+- `-redundant` on the client copies frames to a second path while at most
+  64 KiB is unacknowledged, so a lost or stalled packet does not freeze an
+  interactive stream. It is negotiated with the `Resumux-Redundant` header;
+  `-refuse-redundant` lets a server decline it.
+- `-listen` on the server takes several addresses, such as `:443,:8443`.

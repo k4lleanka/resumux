@@ -96,3 +96,12 @@ func localAddr(r *http.Request) netip.AddrPort {
 	}
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
+
+// logAddr formats a client address for the log, leaving out the port a
+// proxy's header does not carry.
+func logAddr(a netip.AddrPort) string {
+	if a.Port() == 0 {
+		return a.Addr().String()
+	}
+	return a.String()
+}

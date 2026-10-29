@@ -281,7 +281,7 @@ func runClient(args []string) error {
 	caFile := fs.String("ca-file", "", "PEM file with CA certificates to trust instead of the system ones")
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long to keep trying to resume a session")
 	deadAfter := fs.Duration("dead-after", 5*time.Second, "how long a path may stay silent before the session moves off it")
-	redundant := fs.Bool("redundant", false, "send small packets on two paths at once, so a lost or stalled packet does not freeze the stream (for games; uses more bandwidth)")
+	redundant := fs.Bool("redundant", false, "send frames on two paths at once while little is in flight, so a lost or stalled packet does not freeze the stream (for games; uses more bandwidth)")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err

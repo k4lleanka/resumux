@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
@@ -275,5 +276,105 @@ func TestDecodeCopy(t *testing.T) {
 	}
 	if f, err := decodeFrame(encodeFrame(frameAck|copyFlag, 7, nil)); err != nil || !f.copy || f.kind != frameAck {
 		t.Errorf("decoded copied acknowledgement as %+v, %v", f, err)
+	}
+}
+
+// ackingPath acknowledges every DATA and FIN frame written to it at once.
+type ackingPath struct {
+	in   chan []byte
+	done chan struct{}
+}
+
+func (p *ackingPath) ReadFrame() ([]byte, error) {
+	select {
+	case b := <-p.in:
+		return b, nil
+	case <-p.done:
+		return nil, ErrClosed
+	}
+}
+
+func (p *ackingPath) WriteFrame(b []byte) error {
+	if k := b[0] &^ copyFlag; k == frameData || k == frameFin {
+		select {
+		case p.in <- encodeFrame(frameAck, binary.BigEndian.Uint64(b[1:frameHeaderLen])+1, nil):
+		default:
+		}
+	}
+	return nil
+}
+
+func (p *ackingPath) Close() error         { return nil }
+func (p *ackingPath) CloseWrite() error    { return nil }
+func (p *ackingPath) Quiet() time.Duration { return 0 }
+
+// stalledPath looks freshly heard from, but each write takes delay, like a
+// TCP connection whose peer has stopped reading.
+type stalledPath struct {
+	delay  time.Duration
+	writes atomic.Int64
+	done   chan struct{}
+}
+
+func (p *stalledPath) ReadFrame() ([]byte, error) { <-p.done; return nil, ErrClosed }
+
+func (p *stalledPath) WriteFrame([]byte) error {
+	p.writes.Add(1)
+	select {
+	case <-time.After(p.delay):
+	case <-p.done:
+	}
+	return nil
+}
+
+func (p *stalledPath) Close() error         { return nil }
+func (p *stalledPath) CloseWrite() error    { return nil }
+func (p *stalledPath) Quiet() time.Duration { return 0 }
+
+// A peer that acknowledges on one path and stalls another must not make
+// copies pile up beyond copyBudget, outside the send window.
+func TestRedundantCopyQueueIsBoundedInBytes(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
+	s := New(Config{Redundant: true, FollowPeer: true})
+	defer s.Abort(nil)
+	s.AddPath(&ackingPath{in: make(chan []byte, 1024), done: done})
+	s.AddPath(&stalledPath{delay: time.Hour, done: done})
+	buf := make([]byte, s.cfg.MaxFrameSize)
+	for range 500 {
+		if _, err := s.Write(buf); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	s.mu.Lock()
+	spare := s.paths[1]
+	s.mu.Unlock()
+	if n := spare.copyBytes.Load(); n > copyBudget {
+		t.Fatalf("%d bytes of copies queued for a stalled path, budget %d", n, copyBudget)
+	}
+}
+
+// Copies queued for a stalled path are dropped when the session closes,
+// instead of each waiting out the stall first.
+func TestRedundantCloseDoesNotWaitOutQueuedCopies(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
+	s := New(Config{Redundant: true, FollowPeer: true})
+	s.AddPath(&ackingPath{in: make(chan []byte, 1024), done: done})
+	spare := &stalledPath{delay: time.Second, done: done}
+	s.AddPath(spare)
+	for range 5 {
+		s.Write([]byte("x"))
+	}
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	s.Close()
+	// One write was already under way when Close began; it may finish.
+	if d := time.Since(start); d > 2500*time.Millisecond {
+		t.Fatalf("Close took %s", d)
+	}
+	if n := spare.writes.Load(); n > 2 {
+		t.Fatalf("%d copies written on the stalled path, want at most 2", n)
 	}
 }

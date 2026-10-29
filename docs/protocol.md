@@ -74,7 +74,7 @@ ACK   0x03 | next (8 bytes)
 
 In a redundant session, frames may also come as copies, with the high bit of
 the type set: `0x81`, `0x82` and `0x83`. A copy means the same as the
-original.
+original. Receivers accept copies in any session.
 
 Senders never send a DATA frame with an empty payload; receivers accept one
 and treat it as already read.
@@ -150,6 +150,8 @@ answer; the session is then a plain one on both sides.
 
 Copies are optional: a sender may drop one, for example when the path is
 behind, since the original is kept for retransmission like any frame. The
+reference implementation keeps at most 64 KiB of copies waiting for a path,
+and drops those the peer has acknowledged before sending them. The
 receiver drops whichever copy arrives second as a duplicate, and the server
 does not follow the client to a path because a copy arrived there.
 

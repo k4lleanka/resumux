@@ -9,10 +9,12 @@
 package session
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -106,8 +108,9 @@ func cost(payload []byte) int { return len(payload) + frameCost }
 // pass it at once and are then sent only once.
 const copyBudget = 64 << 10
 
-// copyQueue is how many copies may wait for a path. Copies beyond it are
-// dropped, so a stalled path never holds up the writer.
+// copyQueue is how many copies may wait for a path, and copyBudget how many
+// bytes. Copies beyond either are dropped, so a stalled path never holds up
+// the writer or holds more than the budget.
 const copyQueue = 64
 
 type sentFrame struct {
@@ -128,9 +131,12 @@ type pathState struct {
 	dead   bool
 	gone   chan struct{} // closed when dead is set
 	copies chan []byte
-	// draining is set, under wmu, once the path is half-closed; nothing may
-	// be written on it after that.
-	draining bool
+	// copyBytes is the size of the copies waiting in copies.
+	copyBytes atomic.Int64
+	// draining is set before the path is half-closed; nothing may be written
+	// on it after that. It is set without wmu, so queued copies stop at once
+	// instead of each waiting out a stalled write.
+	draining atomic.Bool
 }
 
 // Session is a reliable byte stream over a changing set of paths.
@@ -241,9 +247,7 @@ func (s *Session) copyUnacked(ps *pathState) {
 		return
 	}
 	for _, f := range s.unacked {
-		select {
-		case ps.copies <- encodeFrame(f.kind|copyFlag, f.seq, f.payload):
-		default:
+		if !queueCopy(ps, encodeFrame(f.kind|copyFlag, f.seq, f.payload)) {
 			return
 		}
 	}
@@ -417,7 +421,7 @@ func (s *Session) Abort(err error) {
 
 func (s *Session) send(ps *pathState, enc []byte) {
 	ps.wmu.Lock()
-	if ps.draining {
+	if ps.draining.Load() {
 		ps.wmu.Unlock()
 		return
 	}
@@ -446,9 +450,21 @@ func (s *Session) sendCopy(ps *pathState, enc []byte) {
 	}
 	c := append([]byte(nil), enc...)
 	c[0] |= copyFlag
+	queueCopy(ps, c)
+}
+
+func queueCopy(ps *pathState, c []byte) bool {
+	n := int64(len(c))
+	if ps.copyBytes.Add(n) > copyBudget {
+		ps.copyBytes.Add(-n)
+		return false
+	}
 	select {
 	case ps.copies <- c:
+		return true
 	default:
+		ps.copyBytes.Add(-n)
+		return false
 	}
 }
 
@@ -460,9 +476,24 @@ func (s *Session) copyLoop(ps *pathState) {
 		case <-ps.gone:
 			return
 		case c := <-ps.copies:
-			s.send(ps, c)
+			ps.copyBytes.Add(-int64(len(c)))
+			if !s.copyStale(c) {
+				s.send(ps, c)
+			}
 		}
 	}
+}
+
+// copyStale reports whether c copies a frame the peer has already
+// acknowledged, as queued copies are after a stall.
+func (s *Session) copyStale(c []byte) bool {
+	if c[0]&^copyFlag == frameAck {
+		return false
+	}
+	seq := binary.BigEndian.Uint64(c[1:frameHeaderLen])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.unacked) == 0 || s.unacked[0].seq > seq
 }
 
 // resync tells the peer how far this side has read, and optionally sends
@@ -482,7 +513,7 @@ func (s *Session) resync(ps *pathState, retransmit bool) {
 
 	ps.wmu.Lock()
 	defer ps.wmu.Unlock()
-	if ps.draining {
+	if ps.draining.Load() {
 		return
 	}
 	if err := ps.p.WriteFrame(ack); err != nil {
@@ -804,11 +835,17 @@ func (s *Session) drainPaths() {
 	s.mu.Lock()
 	paths := append([]*pathState(nil), s.paths...)
 	s.mu.Unlock()
+	// Every path stops first, so queued copies are not written, each waiting
+	// out a stalled path, while the paths are closed one by one.
+	for _, ps := range paths {
+		if _, ok := ps.p.(interface{ CloseWrite() error }); ok {
+			ps.draining.Store(true)
+		}
+	}
 	half := false
 	for _, ps := range paths {
 		if hc, ok := ps.p.(interface{ CloseWrite() error }); ok {
 			ps.wmu.Lock()
-			ps.draining = true
 			hc.CloseWrite()
 			ps.wmu.Unlock()
 			half = true

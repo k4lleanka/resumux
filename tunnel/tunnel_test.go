@@ -392,14 +392,14 @@ func listenTarget(t testing.TB, handle func(*net.TCPConn)) string {
 	return l.Addr().String()
 }
 
-// TestHalfClose checks that closing the client's write side reaches the
-// target as EOF while the reply can still flow back.
 // bothModes runs a test with and without redundant sessions.
 func bothModes(t *testing.T, test func(t *testing.T, redundant bool)) {
 	t.Run("plain", func(t *testing.T) { test(t, false) })
 	t.Run("redundant", func(t *testing.T) { test(t, true) })
 }
 
+// TestHalfClose checks that closing the client's write side reaches the
+// target as EOF while the reply can still flow back.
 func TestHalfClose(t *testing.T) { bothModes(t, halfClose) }
 
 func halfClose(t *testing.T, redundant bool) {

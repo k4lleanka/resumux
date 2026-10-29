@@ -203,7 +203,7 @@ func (sv *Server) resume(w http.ResponseWriter, r *http.Request, id string) {
 	if err != nil {
 		return
 	}
-	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], clientAddr(r, sv.cfg), ss.s.NumPaths())
+	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], logAddr(clientAddr(r, sv.cfg)), ss.s.NumPaths())
 }
 
 func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +293,7 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.AddPath(wspath.New(c, sv.cfg.Path))
-	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], client)
+	sv.cfg.Logger.Printf("session %s: opened from %s", id[:8], logAddr(client))
 	start := time.Now()
 	started = true
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
