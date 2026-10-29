@@ -203,7 +203,7 @@ func (sv *Server) resume(w http.ResponseWriter, r *http.Request, id string) {
 	if err != nil {
 		return
 	}
-	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], r.RemoteAddr, ss.s.NumPaths())
+	sv.cfg.Logger.Printf("session %s: path from %s, %d open", id[:8], clientAddr(r, sv.cfg), ss.s.NumPaths())
 }
 
 func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
