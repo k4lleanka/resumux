@@ -296,18 +296,21 @@ server's Cloudflare connector lost the network, and the session carried on
 once it was back. One run on one connection is not a benchmark; it shows
 what the mechanisms do on a real CDN.
 
-For `-redundant`, 16 sessions ran side by side for an hour over the same
-link, half of them with it, each with ten 300-byte messages a second and a
-16 KiB burst every five seconds:
+For `-redundant`, 16 sessions ran side by side for an hour from the same
+home connection, half of them with it, each with ten 300-byte messages a
+second and a 16 KiB burst every five seconds. The server ran on a VPS in
+France, behind a Cloudflare quick tunnel served from Frankfurt:
 
-| | Messages | 99th percentile | Stalls over 200 ms | of them on one path |
-|---|---|---|---|---|
-| Plain | 288,000 of 288,000, in order | 25–33 ms | 35 | 29 |
-| `-redundant` | 288,000 of 288,000, in order | 24–27 ms | 4 | 0 |
+| | Messages | Median round trip | 99th percentile | Stalls over 200 ms | Longest |
+|---|---|---|---|---|---|
+| Plain | 288,000 of 288,000, in order | 29–33 ms | 43–47 ms | 28 | 742 ms |
+| `-redundant` | 288,000 of 288,000, in order | 24–30 ms | 36–44 ms | 1 | 200 ms |
 
-Every stall on one path, the 200–340 ms kind that a lost packet causes, was
-hidden. The rest happened to all sessions at the same moment, as the home
-connection itself paused.
+Each stall without it hit one session at a time, the kind a lost packet
+causes; 742 ms is about what TCP waits when the resend is lost too. The
+same comparison with the server on the home connection gave 29 such stalls
+against none.
+
 
 ## Security
 
