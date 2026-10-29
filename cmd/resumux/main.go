@@ -147,7 +147,7 @@ func signalContext() (context.Context, context.CancelFunc) {
 func runServer(args []string) error {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	config := fs.String("config", "", "JSON file with settings")
-	listen := fs.String("listen", ":8080", "address to accept WebSocket connections on")
+	listen := fs.String("listen", ":8080", "address to accept WebSocket connections on, or several separated by commas")
 	path := fs.String("path", "/", "HTTP path that accepts tunnels")
 	target := fs.String("target", "", "host:port every session is forwarded to (required)")
 	tokenFile := fs.String("token-file", "", "file with the shared token (or set RESUMUX_TOKEN)")
@@ -186,6 +186,10 @@ func runServer(args []string) error {
 	if (*perClient > 0 || *newPerClient > 0) && len(proxies) == 0 {
 		log.Printf("per-client limits see only the address each request comes from. Behind a proxy or CDN connector, set -trusted-proxies and -client-ip-header, or every client looks like the proxy: unlimited if it is on this machine, limited together if it is not")
 	}
+	addrs, err := listenAddrs(*listen)
+	if err != nil {
+		return err
+	}
 	if !strings.HasPrefix(*path, "/") {
 		return fmt.Errorf("-path must start with /, got %q", *path)
 	}
@@ -217,12 +221,23 @@ func runServer(args []string) error {
 	mux := http.NewServeMux()
 	mux.Handle(*path, sv)
 	hs := &http.Server{
-		Addr:              *listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Hijacked WebSocket connections are not affected; this only drops
 		// idle keep-alive connections, such as after a rejected handshake.
 		IdleTimeout: time.Minute,
+	}
+	// All are opened before any is served, so a taken port fails at once.
+	var listeners []net.Listener
+	for _, a := range addrs {
+		l, err := net.Listen("tcp", a)
+		if err != nil {
+			for _, l := range listeners {
+				l.Close()
+			}
+			return err
+		}
+		listeners = append(listeners, l)
 	}
 
 	ctx, stop := signalContext()
@@ -233,12 +248,22 @@ func runServer(args []string) error {
 		hs.Close()
 	}()
 
-	log.Printf("server listening on %s%s, forwarding to %s", *listen, *path, *target)
-	if *tlsCert != "" {
-		err = hs.ListenAndServeTLS(*tlsCert, *tlsKey)
-	} else {
-		err = hs.ListenAndServe()
+	log.Printf("server listening on %s, path %s, forwarding to %s", strings.Join(addrs, ", "), *path, *target)
+	errc := make(chan error, len(listeners))
+	for _, l := range listeners {
+		go func() {
+			if *tlsCert != "" {
+				errc <- hs.ServeTLS(l, *tlsCert, *tlsKey)
+			} else {
+				errc <- hs.Serve(l)
+			}
+		}()
 	}
+	// One listener failing stops the others, so the server never runs on
+	// fewer addresses than it was told.
+	err = <-errc
+	sv.Close()
+	hs.Close()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -354,6 +379,24 @@ func serverURLs(s string) ([]string, error) {
 		urls = append(urls, u)
 	}
 	return urls, nil
+}
+
+// listenAddrs parses a comma-separated list of addresses to listen on.
+func listenAddrs(s string) ([]string, error) {
+	var addrs []string
+	seen := map[string]bool{}
+	for _, a := range strings.Split(s, ",") {
+		a = strings.TrimSpace(a)
+		if _, _, err := net.SplitHostPort(a); err != nil {
+			return nil, fmt.Errorf("-listen: %q is not host:port", a)
+		}
+		if seen[a] {
+			return nil, fmt.Errorf("-listen: %q is listed twice", a)
+		}
+		seen[a] = true
+		addrs = append(addrs, a)
+	}
+	return addrs, nil
 }
 
 // parsePrefixes parses a comma-separated list of addresses and CIDR ranges.

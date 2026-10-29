@@ -64,6 +64,21 @@ func TestServerURLs(t *testing.T) {
 	}
 }
 
+func TestListenAddrs(t *testing.T) {
+	got, err := listenAddrs(":443, :2053,[::1]:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != ":443" || got[1] != ":2053" || got[2] != "[::1]:8443" {
+		t.Fatalf("got %q", got)
+	}
+	for _, bad := range []string{"", ":443,", "443", ":443,:443"} {
+		if _, err := listenAddrs(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
 func TestLoadConfigList(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"server": ["wss://a.example/", "wss://a.example:8443/"]}`), 0o600); err != nil {

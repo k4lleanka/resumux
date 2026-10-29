@@ -125,7 +125,15 @@ resumux client -listen 127.0.0.1:2222 -token-file token \
 They can differ in port, so that a CDN serves them as separate connections,
 in address, or in provider, such as one URL through a CDN and one straight to
 the server. The server has to be reachable on each. Cloudflare, for example,
-proxies HTTPS on ports 443, 2053, 2083, 2087, 2096 and 8443. A session gets at
+proxies HTTPS on ports 443, 2053, 2083, 2087, 2096 and 8443, and connects to
+the server on the port the client used, so the server listens on each:
+
+```sh
+resumux server -listen :443,:2053,:8443 -tls-cert cert.pem -tls-key key.pem \
+  -target 127.0.0.1:22 -token-file token
+```
+
+A session gets at
 least one path per URL, and a new connection falls through to the next URL
 when one fails or is slow to answer. A URL that answers that it does not know
 the session ends it only if that URL has carried one of its paths before; any
@@ -235,6 +243,18 @@ server skips entries they added and takes the first one before them.
 The safest setup is a server that listens on loopback only, with the CDN's
 connector, such as cloudflared, on the same machine. Then nothing off that
 machine can reach the server except through the CDN.
+
+The header is 28 bytes for an IPv4 client and 52 for an IPv6 one, as the
+protocol defines; when the client's address is unknown, it is 16 bytes and
+tells the target to use the connection's own. Some targets with
+hand-written support read a fixed 28 bytes and only understand IPv4, so an
+IPv6 client, or one without an address, corrupts the start of their
+stream. Such a target should read the length the header gives, as the
+specification requires. Until it does, keep both ends on IPv4: have the
+server listen on an IPv4 address, such as 127.0.0.1, since the header names
+both ends in one family, and keep the clients on IPv4 as well. Behind
+Cloudflare, for example, Pseudo IPv4 set to overwrite headers puts an IPv4
+address derived from the IPv6 one in CF-Connecting-IP.
 
 ## Public servers
 
