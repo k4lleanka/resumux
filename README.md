@@ -131,6 +131,27 @@ when one fails or is slow to answer. A URL that answers that it does not know
 the session ends it only if that URL has carried one of its paths before; any
 other such URL may reach a different server, so it is logged and retried.
 
+## Games and other interactive traffic
+
+TCP hides a lost packet by sending it again, but when only a few small
+packets are in flight, as in a game, it first waits for a timer: often
+200–300 ms, and twice that if the resend is lost too. A path that goes silent
+stalls the stream for about two seconds, until the client moves off it.
+
+With `-redundant` on the client, both sides send each frame on a second path
+as well, and the receiver keeps whichever copy arrives first:
+
+```sh
+resumux client -listen 127.0.0.1:7000 -server wss://example.com/ -token-file token -redundant
+```
+
+A packet lost or held up on one path then arrives on time over the other.
+Copies are only sent while at most 64 KiB is unacknowledged, so a large
+download is sent once; a game's traffic stays far below that and costs
+about twice its usual bandwidth, a few kilobytes a second per player. It does
+not help when the client's own connection stalls, since every path crosses
+it. A server can turn the feature down with `-refuse-redundant`.
+
 ## Try it on a flaky link
 
 `examples/flakyproxy` forwards TCP and cuts every connection at a fixed
@@ -275,6 +296,19 @@ server's Cloudflare connector lost the network, and the session carried on
 once it was back. One run on one connection is not a benchmark; it shows
 what the mechanisms do on a real CDN.
 
+For `-redundant`, 16 sessions ran side by side for an hour over the same
+link, half of them with it, each with ten 300-byte messages a second and a
+16 KiB burst every five seconds:
+
+| | Messages | 99th percentile | Stalls over 200 ms | of them on one path |
+|---|---|---|---|---|
+| Plain | 288,000 of 288,000, in order | 25–33 ms | 35 | 29 |
+| `-redundant` | 288,000 of 288,000, in order | 24–27 ms | 4 | 0 |
+
+Every stall on one path, the 200–340 ms kind that a lost packet causes, was
+hidden. The rest happened to all sessions at the same moment, as the home
+connection itself paused.
+
 ## Security
 
 - Every path must present the shared token (`Authorization: Bearer`). It is
@@ -313,7 +347,7 @@ eight characters of the session id. Secrets are never logged.
 
 | | WebSocket / CDN | Open connections survive a reconnect | Several paths per connection |
 |---|---|---|---|
-| resumux | yes | yes | yes (failover) |
+| resumux | yes | yes | yes (failover, or redundant copies) |
 | [kptunnel](https://github.com/ifritJP/kptunnel) | WebSocket; CDN not documented | yes, per its README | not documented |
 | [chisel](https://github.com/jpillora/chisel) | yes | no | no |
 | [wstunnel](https://github.com/erebe/wstunnel) | yes | no | no |
