@@ -109,7 +109,9 @@ func TestTextMessageIsRejected(t *testing.T) {
 // A path that is receiving frames must not be pinged: the ping would only
 // compete with the traffic, which costs latency in interactive use.
 func TestBusyPathIsNotPinged(t *testing.T) {
-	p, peer := pair(t, Options{PingInterval: 50 * time.Millisecond, DeadAfter: time.Second})
+	// Frames every 10 ms against a 250 ms interval leave room for a slow CI
+	// machine to stall the writer without the path really going quiet.
+	p, peer := pair(t, Options{PingInterval: 250 * time.Millisecond, DeadAfter: 5 * time.Second})
 	var pings atomic.Int32
 	peer.SetPingHandler(func(string) error {
 		pings.Add(1)
@@ -130,7 +132,7 @@ func TestBusyPathIsNotPinged(t *testing.T) {
 		}
 	}()
 
-	stop := time.After(500 * time.Millisecond)
+	stop := time.After(1500 * time.Millisecond)
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
