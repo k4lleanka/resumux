@@ -36,7 +36,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          # staticcheck needs a newer Go than the oldest one resumux supports.
+          go-version: stable
       - name: gofmt
         run: test -z "$(gofmt -l .)"
       - name: staticcheck
