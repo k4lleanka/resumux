@@ -128,7 +128,7 @@ time over the other, and a frozen path goes unnoticed.
 ## Numbers
 
 Through a Cloudflare quick tunnel from a home connection in Europe, ten small
-messages a second each way:
+messages a second each way, without `-redundant`:
 
 | | Arrived | Median | Slowest |
 |---|---|---|---|
@@ -142,6 +142,11 @@ server's Cloudflare connector at once, and the same session carried on.
 The messages sent during the outage, about a third of that run, waited
 and arrived when the network came back, up to 43 s late. The rest went
 through as usual, so the median stays at 26 ms.
+
+A silenced path costs about two seconds without `-redundant`, the time it
+takes to tell a dead path from a slow one. With it, the copy on the other
+path is already there: the same fault in the test suite gives a worst round
+trip of a few milliseconds instead of over two seconds.
 
 `-redundant`, with 16 sessions over an hour, half of them redundant, against
 a server on a VPS in France. Each sent ten 300-byte messages a second plus a
