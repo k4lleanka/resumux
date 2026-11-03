@@ -119,6 +119,64 @@ func TestRedundantHidesStalledPathAtHighRate(t *testing.T) {
 	}
 }
 
+// TestCopyAllHidesTwoStalledPaths holds up two of three paths at once, each
+// pair in turn. With CopyAll every frame also travels the third path, so no
+// pair can stall the stream, whichever paths the sides send and copy on.
+func TestCopyAllHidesTwoStalledPaths(t *testing.T) {
+	for _, held := range [][2]int{{0, 1}, {0, 2}, {1, 2}} {
+		leader := New(Config{Redundant: true, CopyAll: true})
+		follower := New(Config{FollowPeer: true, Redundant: true, CopyAll: true})
+		var holds [3]atomic.Bool
+		var wire atomic.Int64
+		for i := range holds {
+			a, b := holdPair(&holds[i], &wire)
+			leader.AddPath(a)
+			follower.AddPath(b)
+		}
+		go func() {
+			msg := make([]byte, 32)
+			for {
+				if _, err := io.ReadFull(follower, msg); err != nil {
+					return
+				}
+				if _, err := follower.Write(msg); err != nil {
+					return
+				}
+			}
+		}()
+		var worst time.Duration
+		msg, back := make([]byte, 32), make([]byte, 32)
+		for i := range 300 {
+			if i == 100 {
+				holds[held[0]].Store(true)
+				holds[held[1]].Store(true)
+				time.AfterFunc(300*time.Millisecond, func() {
+					holds[held[0]].Store(false)
+					holds[held[1]].Store(false)
+				})
+			}
+			copy(msg, fmt.Sprintf("message %d", i))
+			start := time.Now()
+			if _, err := leader.Write(msg); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(leader, back); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(back, msg) {
+				t.Fatalf("message %d came back as %q", i, back)
+			}
+			worst = max(worst, time.Since(start))
+			time.Sleep(2 * time.Millisecond)
+		}
+		leader.Abort(nil)
+		follower.Abort(nil)
+		if worst > 150*time.Millisecond {
+			t.Errorf("paths %v held: worst round trip %s, want the stall hidden", held, worst)
+		}
+	}
+}
+
 // TestRedundantBulkIsSentOnce sends far more than copyBudget, each way. Only
 // the start may be copied.
 func TestRedundantBulkIsSentOnce(t *testing.T) {

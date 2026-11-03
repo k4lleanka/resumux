@@ -29,6 +29,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/k4lleanka/resumux/session"
 	"github.com/k4lleanka/resumux/tunnel"
 	"github.com/k4lleanka/resumux/wspath"
 )
@@ -163,6 +164,8 @@ func runServer(args []string) error {
 	perClient := fs.Int("max-sessions-per-client", 0, "sessions one client address may hold at once (0: no limit)")
 	newPerClient := fs.Int("max-new-sessions-per-client", 0, "sessions one client address may open per minute (0: no limit)")
 	refuseRedundant := fs.Bool("refuse-redundant", false, "give clients that ask for -redundant plain sessions instead")
+	ackDelay := fs.Duration("ack-delay", 10*time.Millisecond, "how long acknowledgements wait to be sent together; longer means fewer messages, not more latency")
+	copyAll := fs.Bool("copy-all", false, "in redundant sessions, copy each frame to every path instead of a second one")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -214,6 +217,7 @@ func runServer(args []string) error {
 		MaxSessionsPerClient:    *perClient,
 		MaxNewSessionsPerClient: *newPerClient,
 		RefuseRedundant:         *refuseRedundant,
+		Session:                 session.Config{AckDelay: *ackDelay, CopyAll: *copyAll},
 	})
 	if err != nil {
 		return err
@@ -282,6 +286,8 @@ func runClient(args []string) error {
 	resume := fs.Duration("resume-timeout", 2*time.Minute, "how long to keep trying to resume a session")
 	deadAfter := fs.Duration("dead-after", 5*time.Second, "how long a path may stay silent before the session moves off it")
 	redundant := fs.Bool("redundant", false, "send frames on two paths at once while little is in flight, so a lost or stalled packet does not freeze the stream (for games; uses more bandwidth)")
+	ackDelay := fs.Duration("ack-delay", 10*time.Millisecond, "how long acknowledgements wait to be sent together; longer means fewer messages, not more latency")
+	copyAll := fs.Bool("copy-all", false, "in redundant sessions, copy each frame to every path instead of a second one")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -318,6 +324,7 @@ func runClient(args []string) error {
 		Header:        header,
 		Dialer:        dialer,
 		Redundant:     *redundant,
+		Session:       session.Config{AckDelay: *ackDelay, CopyAll: *copyAll},
 	})
 	if err != nil {
 		return err

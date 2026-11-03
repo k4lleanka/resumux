@@ -64,6 +64,10 @@ type Config struct {
 	// flight, so a frame that a path loses or holds up still arrives on time
 	// over the other. Set it on both sides.
 	Redundant bool
+	// CopyAll makes a redundant session copy each frame to every other path
+	// instead of only the least quiet one, so a frame is late only if every
+	// path loses or holds it up. It only changes the sending side.
+	CopyAll bool
 }
 
 func (c Config) withDefaults() Config {
@@ -434,25 +438,42 @@ func (s *Session) send(ps *pathState, enc []byte) {
 	}
 }
 
-// copyPathLocked returns the path a redundant session copies the frame just
+// copyPathLocked returns the paths a redundant session copies the frame just
 // queued to, or nil if it should be sent only once.
-func (s *Session) copyPathLocked() *pathState {
+func (s *Session) copyPathLocked() []*pathState {
 	if !s.cfg.Redundant || s.active == nil || s.unackedBytes > copyBudget {
 		return nil
 	}
-	ps, _ := s.leastQuietLocked(s.active)
-	return ps
+	return s.copyTargetsLocked(s.active)
 }
 
-// sendCopy queues a copy of enc for ps, or drops it if ps is behind. The
-// original stays queued for retransmission, so a dropped copy loses nothing.
-func (s *Session) sendCopy(ps *pathState, enc []byte) {
-	if ps == nil {
-		return
+// copyTargetsLocked returns the paths other than skip that copies go to: all
+// of them with CopyAll, otherwise the least quiet one.
+func (s *Session) copyTargetsLocked(skip *pathState) []*pathState {
+	if !s.cfg.CopyAll {
+		if ps, _ := s.leastQuietLocked(skip); ps != nil {
+			return []*pathState{ps}
+		}
+		return nil
 	}
-	c := append([]byte(nil), enc...)
-	c[0] |= copyFlag
-	queueCopy(ps, c)
+	var out []*pathState
+	for _, ps := range s.paths {
+		if ps != skip {
+			out = append(out, ps)
+		}
+	}
+	return out
+}
+
+// sendCopy queues a copy of enc for each of paths, or drops it for a path that
+// is behind. The original stays queued for retransmission, so a dropped copy
+// loses nothing.
+func (s *Session) sendCopy(paths []*pathState, enc []byte) {
+	for _, ps := range paths {
+		c := append([]byte(nil), enc...)
+		c[0] |= copyFlag
+		queueCopy(ps, c)
+	}
 }
 
 func queueCopy(ps *pathState, c []byte) bool {
@@ -700,9 +721,9 @@ func (s *Session) flushAck() {
 	// Acknowledgements are copied whatever is in flight: without them, a
 	// stalled path would let unacknowledged data pass copyBudget and end the
 	// copies just when they are needed.
-	var cp *pathState
+	var cp []*pathState
 	if s.cfg.Redundant {
-		cp, _ = s.leastQuietLocked(ps)
+		cp = s.copyTargetsLocked(ps)
 	}
 	s.mu.Unlock()
 	s.sendCopy(cp, enc)
