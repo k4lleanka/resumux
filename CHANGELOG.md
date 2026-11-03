@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `-ack-delay` on server and client sets how long acknowledgements wait to
+  be sent together (10 ms by default). Acknowledgements only free the
+  sender's buffer, so 100 ms costs no latency and cut resumux CPU by about
+  12% under a game load.
+- `-copy-all` makes a redundant session copy each frame to every path
+  instead of a second one, so a frame is late only if every path holds it
+  up. With 15% loss on the paths it cut samples over 250 ms from 7–12 to
+  1–3. It only changes the side that sets it.
+
 ## v0.1.0 (2026-10-29)
 
 First version.
