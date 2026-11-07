@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -166,6 +167,9 @@ func runServer(args []string) error {
 	refuseRedundant := fs.Bool("refuse-redundant", false, "give clients that ask for -redundant plain sessions instead")
 	ackDelay := fs.Duration("ack-delay", 10*time.Millisecond, "how long acknowledgements wait to be sent together; longer means fewer messages, not more latency")
 	copyAll := fs.Bool("copy-all", false, "in redundant sessions, copy each frame to every path instead of a second one")
+	var sendWindow, recvWindow size
+	fs.Var(&sendWindow, "send-window", "how much sent data may wait for acknowledgement per session, e.g. 1MiB (default 4MiB)")
+	fs.Var(&recvWindow, "recv-window", "how much received data one session may buffer before it is ended, e.g. 256KiB (default 8MiB); must exceed the clients' send window")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -217,7 +221,10 @@ func runServer(args []string) error {
 		MaxSessionsPerClient:    *perClient,
 		MaxNewSessionsPerClient: *newPerClient,
 		RefuseRedundant:         *refuseRedundant,
-		Session:                 session.Config{AckDelay: *ackDelay, CopyAll: *copyAll},
+		Session: session.Config{
+			AckDelay: *ackDelay, CopyAll: *copyAll,
+			SendWindow: int(sendWindow), RecvWindow: int(recvWindow),
+		},
 	})
 	if err != nil {
 		return err
@@ -445,4 +452,30 @@ func parsePrefixes(s string) ([]netip.Prefix, error) {
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// size is a byte count written as a number with an optional KiB, MiB or GiB
+// suffix. Zero means the default.
+type size int
+
+func (s *size) String() string { return strconv.Itoa(int(*s)) }
+
+func (s *size) Set(in string) error {
+	v := strings.TrimSpace(in)
+	mult := 1
+	for suffix, m := range map[string]int{"KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30} {
+		if strings.HasSuffix(v, suffix) {
+			v, mult = strings.TrimSuffix(v, suffix), m
+			break
+		}
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 || n > (1<<31-1)/mult {
+		return fmt.Errorf("%q is not a size such as 65536, 256KiB or 4MiB", in)
+	}
+	if n*mult != 0 && n*mult < 64<<10 {
+		return fmt.Errorf("%d bytes is too small; use at least 64KiB", n*mult)
+	}
+	*s = size(n * mult)
+	return nil
 }

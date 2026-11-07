@@ -121,3 +121,18 @@ func TestParsePrefixes(t *testing.T) {
 		t.Errorf("mapped addresses became %v", mapped)
 	}
 }
+
+func TestSize(t *testing.T) {
+	for in, want := range map[string]int{"0": 0, "65536": 65536, "256KiB": 256 << 10, " 4MiB ": 4 << 20, "1GiB": 1 << 30} {
+		var s size
+		if err := s.Set(in); err != nil || int(s) != want {
+			t.Errorf("Set(%q) = %d, %v; want %d", in, int(s), err, want)
+		}
+	}
+	for _, in := range []string{"", "abc", "-1", "4MB", "1000", "2GiB", "99999999GiB"} {
+		var s size
+		if err := s.Set(in); err == nil {
+			t.Errorf("Set(%q) = %d, want an error", in, int(s))
+		}
+	}
+}
