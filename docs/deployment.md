@@ -92,6 +92,38 @@ or an IPv6 /48 (65,536 /64s, which some hosts hand out freely), can still
 open sessions up to `-max-sessions`. Pair them with rate limiting at the
 proxy or CDN, such as a Cloudflare rate limiting rule on the WebSocket path.
 
+### Memory per session
+
+Each session may buffer up to its receive window from the client, 8 MiB by
+default, and its send window toward it, 4 MiB. A client that sends data out
+of order makes the server keep it until the gap is filled, so a hostile one
+can hold most of the receive window without the target ever seeing a byte.
+With the defaults, 40 such sessions took a server to 485 MB, and
+`-max-sessions 1024` of them could need 12 GB.
+
+When clients send little, as in a game, make the windows match the traffic:
+
+```sh
+  -recv-window 512KiB -send-window 1MiB
+```
+
+The same 40 sessions were then ended at 512 KiB each, and the server stayed
+under 50 MB. At worst a session now holds about 1.75 MB, so `-max-sessions`
+can be sized from the memory you have.
+
+The windows on the two sides must fit together, or a busy session is ended
+for sending too much:
+
+- The client's `-send-window` must stay under the server's `-recv-window`,
+  with room for 64 bytes per frame in flight. `-send-window 448KiB` fits
+  under `512KiB`.
+- The server's `-send-window` must stay under the client's `-recv-window`.
+  The client default of 8 MiB covers any server setting up to that.
+
+Size the client's send window for the longest outage it must ride out: a
+game client sending 100 small packets a second for a 30 s resume timeout
+needs about 250 KiB.
+
 ### Resume timeout
 
 The default is two minutes. For a game, `-resume-timeout 30s` on the server

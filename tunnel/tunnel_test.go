@@ -197,7 +197,23 @@ func TestPathsCutDuringTransfer(t *testing.T) { bothModes(t, pathsCutDuringTrans
 func pathsCutDuringTransfer(t *testing.T, redundant bool) {
 	h := startServer(t, ServerConfig{})
 	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}, Paths: 3, Redundant: redundant})
+	echoWhileCutting(t, h, addr, 32<<20)
+}
 
+// TestSmallWindowsWhilePathsAreCut runs the windows docs/deployment.md
+// suggests for low-rate clients: a client send window under the server's
+// receive window must carry a bulk transfer, with paths cut, without the
+// server ending the session for overrunning it.
+func TestSmallWindowsWhilePathsAreCut(t *testing.T) {
+	h := startServer(t, ServerConfig{Session: session.Config{RecvWindow: 512 << 10, SendWindow: 1 << 20, CopyAll: true}})
+	addr := startClient(t, ClientConfig{
+		ServerURLs: []string{h.url}, Paths: 3, Redundant: true,
+		Session: session.Config{SendWindow: 448 << 10, CopyAll: true},
+	})
+	echoWhileCutting(t, h, addr, 32<<20)
+}
+
+func echoWhileCutting(t *testing.T, h *harness, addr string, size int) {
 	stop := make(chan struct{})
 	cuts := make(chan int, 1)
 	go func() {
@@ -215,7 +231,7 @@ func pathsCutDuringTransfer(t *testing.T, redundant bool) {
 		}
 	}()
 
-	want := randomData(t, 32<<20)
+	want := randomData(t, size)
 	if got := roundTrip(t, addr, want); !bytes.Equal(got, want) {
 		t.Fatalf("got %d bytes back, want %d, or contents differ", len(got), len(want))
 	}

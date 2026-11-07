@@ -14,8 +14,8 @@
   them, and paths move their deadlines less often. With `-copy-all` and
   `-ack-delay 250ms` on both sides, 500 game sessions on 2 CPUs went from
   1.25 to 1.0 cores, with the same latency.
-- `-send-window` and `-recv-window` on the server set how much one session
-  may buffer, as a size such as `512KiB`. The defaults stay 4 MiB and 8 MiB,
+- `-send-window` and `-recv-window` on server and client set how much one
+  session may buffer, as a size such as `512KiB`. The defaults stay 4 MiB and 8 MiB,
   but a server for low-rate clients, such as a game, can bound what a hostile
   client makes it hold: with `-recv-window 512KiB -send-window 1MiB`, 40
   sessions trying to hold 7 MiB each were ended at 512 KiB and the server

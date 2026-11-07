@@ -295,6 +295,9 @@ func runClient(args []string) error {
 	redundant := fs.Bool("redundant", false, "send frames on two paths at once while little is in flight, so a lost or stalled packet does not freeze the stream (for games; uses more bandwidth)")
 	ackDelay := fs.Duration("ack-delay", 10*time.Millisecond, "how long acknowledgements wait to be sent together; longer means fewer messages, not more latency")
 	copyAll := fs.Bool("copy-all", false, "in redundant sessions, copy each frame to every path instead of a second one")
+	var sendWindow, recvWindow size
+	fs.Var(&sendWindow, "send-window", "how much sent data may wait for acknowledgement per session, e.g. 448KiB (default 4MiB); must stay under the server's receive window")
+	fs.Var(&recvWindow, "recv-window", "how much received data one session may buffer before it is ended, e.g. 2MiB (default 8MiB); must exceed the server's send window")
 	fs.Parse(args)
 	if err := loadConfig(fs, *config); err != nil {
 		return err
@@ -331,7 +334,10 @@ func runClient(args []string) error {
 		Header:        header,
 		Dialer:        dialer,
 		Redundant:     *redundant,
-		Session:       session.Config{AckDelay: *ackDelay, CopyAll: *copyAll},
+		Session: session.Config{
+			AckDelay: *ackDelay, CopyAll: *copyAll,
+			SendWindow: int(sendWindow), RecvWindow: int(recvWindow),
+		},
 	})
 	if err != nil {
 		return err
