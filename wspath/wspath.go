@@ -59,6 +59,11 @@ type Path struct {
 	heard atomic.Int64
 	// halfClosed stops keepalive pings once CloseWrite has been called.
 	halfClosed atomic.Bool
+	// When the deadlines were last moved. Moving one costs a timer update in
+	// the runtime, so they move only once per eighth of their length, and
+	// reach one eighth further to never expire sooner than asked.
+	readSet  time.Time // read loop only
+	writeSet time.Time // under wmu
 }
 
 // New wraps c and starts its keepalive.
@@ -122,8 +127,14 @@ func (p *Path) ReadFrame() ([]byte, error) {
 // counts, since it proves both directions work; a ping from the peer does
 // not, since it only proves one.
 func (p *Path) markHeard() error {
-	p.heard.Store(int64(time.Since(p.start)) + 1)
-	return p.c.SetReadDeadline(time.Now().Add(p.opts.DeadAfter))
+	now := time.Now()
+	p.heard.Store(int64(now.Sub(p.start)) + 1)
+	step := p.opts.DeadAfter / 8
+	if now.Sub(p.readSet) < step {
+		return nil
+	}
+	p.readSet = now
+	return p.c.SetReadDeadline(now.Add(p.opts.DeadAfter + step))
 }
 
 // Quiet reports how long ago the peer was last heard from on this path. A
@@ -141,7 +152,11 @@ func (p *Path) Quiet() time.Duration {
 func (p *Path) WriteFrame(b []byte) error {
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
-	p.c.SetWriteDeadline(time.Now().Add(p.opts.WriteTimeout))
+	now := time.Now()
+	if step := p.opts.WriteTimeout / 8; now.Sub(p.writeSet) >= step {
+		p.writeSet = now
+		p.c.SetWriteDeadline(now.Add(p.opts.WriteTimeout + step))
+	}
 	return p.c.WriteMessage(websocket.BinaryMessage, b)
 }
 

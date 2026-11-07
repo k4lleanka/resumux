@@ -10,6 +10,10 @@
   instead of a second one, so a frame is late only if every path holds it
   up. With 15% loss on the paths it cut samples over 250 ms from 7–12 to
   1–3. It only changes the side that sets it.
+- A redundant session copies acknowledgements to one other path, not all of
+  them, and paths move their deadlines less often. With `-copy-all` and
+  `-ack-delay 250ms` on both sides, 500 game sessions on 2 CPUs went from
+  1.25 to 1.0 cores, with the same latency.
 
 ## v0.1.0 (2026-10-29)
 

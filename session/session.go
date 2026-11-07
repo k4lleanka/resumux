@@ -469,9 +469,13 @@ func (s *Session) copyTargetsLocked(skip *pathState) []*pathState {
 // is behind. The original stays queued for retransmission, so a dropped copy
 // loses nothing.
 func (s *Session) sendCopy(paths []*pathState, enc []byte) {
+	if len(paths) == 0 {
+		return
+	}
+	// Nothing writes to a queued copy, so the paths can share one.
+	c := append([]byte(nil), enc...)
+	c[0] |= copyFlag
 	for _, ps := range paths {
-		c := append([]byte(nil), enc...)
-		c[0] |= copyFlag
 		queueCopy(ps, c)
 	}
 }
@@ -720,10 +724,13 @@ func (s *Session) flushAck() {
 	ps := s.active
 	// Acknowledgements are copied whatever is in flight: without them, a
 	// stalled path would let unacknowledged data pass copyBudget and end the
-	// copies just when they are needed.
+	// copies just when they are needed. One copy is enough even with CopyAll:
+	// a late acknowledgement only delays freeing the buffer, never the data.
 	var cp []*pathState
 	if s.cfg.Redundant {
-		cp = s.copyTargetsLocked(ps)
+		if next, _ := s.leastQuietLocked(ps); next != nil {
+			cp = []*pathState{next}
+		}
 	}
 	s.mu.Unlock()
 	s.sendCopy(cp, enc)
