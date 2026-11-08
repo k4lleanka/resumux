@@ -20,6 +20,8 @@ with a public client:
   too low. The protocol limit is now 64 KiB, and
   [deployment](docs/deployment.md#memory-per-session) gives the corrected
   bound.
+- `-max-sessions-per-network` caps the sessions of a whole IPv6 /48, which
+  holds 65,536 /64s that `-max-sessions-per-client` would each count apart.
 
 - `-ack-delay` on server and client sets how long acknowledgements wait to
   be sent together (10 ms by default). Acknowledgements only free the

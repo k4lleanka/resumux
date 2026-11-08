@@ -87,10 +87,19 @@ one-minute windows, so briefly up to twice that around a window's end.
 - Loopback, link-local and trusted proxies whose client could not be told
   are never counted, since they stand for many clients.
 
-These limits stop one address, not many. Someone with many IPv4 addresses,
-or an IPv6 /48 (65,536 /64s, which some hosts hand out freely), can still
-open sessions up to `-max-sessions`. Pair them with rate limiting at the
-proxy or CDN, such as a Cloudflare rate limiting rule on the WebSocket path.
+An IPv6 /48 is 65,536 /64s, and some hosts hand them out freely, so
+`-max-sessions-per-network` caps a whole /48 as well. Set it well above
+what one subscriber needs, since a /48 is usually one customer but can be
+shared, as on some mobile networks:
+
+```sh
+  -max-sessions-per-client 8 -max-sessions-per-network 64
+```
+
+These limits stop one address or network, not many. Someone with many
+IPv4 addresses can still open sessions up to `-max-sessions`. Pair them
+with rate limiting at the proxy or CDN, such as a Cloudflare rate limiting
+rule on the WebSocket path.
 
 ### Memory per session
 

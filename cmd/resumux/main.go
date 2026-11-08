@@ -164,6 +164,7 @@ func runServer(args []string) error {
 	clientIPHeader := fs.String("client-ip-header", "", "header in which trusted proxies name the client, e.g. CF-Connecting-IP")
 	perClient := fs.Int("max-sessions-per-client", 0, "sessions one client address may hold at once (0: no limit)")
 	newPerClient := fs.Int("max-new-sessions-per-client", 0, "sessions one client address may open per minute (0: no limit)")
+	perNet := fs.Int("max-sessions-per-network", 0, "sessions one IPv6 /48 may hold at once, across its /64s (0: no limit)")
 	refuseRedundant := fs.Bool("refuse-redundant", false, "give clients that ask for -redundant plain sessions instead")
 	halfOpen := fs.Duration("half-open-timeout", time.Minute, "how long, beyond -resume-timeout, a client may keep a session open after the target closed it (negative: no limit)")
 	ackDelay := fs.Duration("ack-delay", 10*time.Millisecond, "how long acknowledgements wait to be sent together; longer means fewer messages, not more latency")
@@ -188,10 +189,10 @@ func runServer(args []string) error {
 	if (len(proxies) == 0) != (*clientIPHeader == "") {
 		return errors.New("-trusted-proxies and -client-ip-header must be given together")
 	}
-	if *perClient < 0 || *newPerClient < 0 {
+	if *perClient < 0 || *newPerClient < 0 || *perNet < 0 {
 		return errors.New("per-client limits cannot be negative")
 	}
-	if (*perClient > 0 || *newPerClient > 0) && len(proxies) == 0 {
+	if (*perClient > 0 || *newPerClient > 0 || *perNet > 0) && len(proxies) == 0 {
 		log.Printf("per-client limits see only the address each request comes from. Behind a proxy or CDN connector, set -trusted-proxies and -client-ip-header, or every client looks like the proxy: unlimited if it is on this machine, limited together if it is not")
 	}
 	addrs, err := listenAddrs(*listen)
@@ -221,6 +222,7 @@ func runServer(args []string) error {
 		ClientIPHeader:          *clientIPHeader,
 		MaxSessionsPerClient:    *perClient,
 		MaxNewSessionsPerClient: *newPerClient,
+		MaxSessionsPerNetwork:   *perNet,
 		RefuseRedundant:         *refuseRedundant,
 		HalfOpenTimeout:         *halfOpen,
 		Session: session.Config{

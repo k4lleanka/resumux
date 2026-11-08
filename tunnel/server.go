@@ -50,6 +50,11 @@ type ServerConfig struct {
 	// session, nor to loopback or trusted proxy addresses, which stand for
 	// many clients.
 	MaxNewSessionsPerClient int
+	// MaxSessionsPerNetwork limits how many sessions one IPv6 /48 may hold at
+	// once, across all its /64s. A /48 is 65,536 /64s, which some hosts hand
+	// out freely, so without it one person could take every session while
+	// staying under MaxSessionsPerClient on each. Zero means no limit.
+	MaxSessionsPerNetwork int
 	// RefuseRedundant turns down clients that ask for redundant sessions, which
 	// can double the traffic the server sends. They get plain sessions.
 	RefuseRedundant bool

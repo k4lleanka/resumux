@@ -43,6 +43,31 @@ func TestClientLimitsSessions(t *testing.T) {
 	}
 }
 
+// One /48 holds 65,536 /64s, each its own client, so it gets its own cap.
+func TestNetworkLimit(t *testing.T) {
+	l := newClientLimits(ServerConfig{MaxSessionsPerClient: 2, MaxSessionsPerNetwork: 3})
+	a := mustAcquire(t, l, "2001:db8:1:1::1", t0)
+	mustAcquire(t, l, "2001:db8:1:2::1", t0)
+	mustAcquire(t, l, "2001:db8:1:3::1", t0)
+	if err := refused(l, "2001:db8:1:4::1", t0); !errors.Is(err, errNetSessions) {
+		t.Fatalf("fourth /64 in the /48: %v, want refused", err)
+	}
+	// Another /48, and IPv4, are not affected.
+	mustAcquire(t, l, "2001:db8:2:1::1", t0)
+	mustAcquire(t, l, "203.0.113.9", t0)
+	mustAcquire(t, l, "203.0.113.9", t0)
+
+	a.release()
+	mustAcquire(t, l, "2001:db8:1:4::1", t0)
+	if err := refused(l, "2001:db8:1:5::1", t0); !errors.Is(err, errNetSessions) {
+		t.Fatalf("after one release: %v, want refused", err)
+	}
+	// A cancelled session gives its place in the /48 back too.
+	l2 := newClientLimits(ServerConfig{MaxSessionsPerNetwork: 1})
+	mustAcquire(t, l2, "2001:db8:1:1::1", t0).cancel()
+	mustAcquire(t, l2, "2001:db8:1:2::1", t0)
+}
+
 func TestClientLimitsRate(t *testing.T) {
 	l := newClientLimits(ServerConfig{MaxNewSessionsPerClient: 3})
 	for i := range 3 {

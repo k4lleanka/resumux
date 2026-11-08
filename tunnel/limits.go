@@ -16,6 +16,7 @@ import (
 // there would cut off a session that is already running.
 type clientLimits struct {
 	maxSessions int // per client at once; 0 means no limit
+	maxPerNet   int // per IPv6 /48 at once; 0 means no limit
 	maxPerMin   int // new sessions per client per minute; 0 means no limit
 	trusted     []netip.Prefix
 
@@ -34,6 +35,7 @@ type clientState struct {
 var (
 	errClientSessions = errors.New("too many sessions from this address")
 	errClientRate     = errors.New("too many new sessions from this address")
+	errNetSessions    = errors.New("too many sessions from this network")
 )
 
 const (
@@ -48,6 +50,7 @@ const (
 func newClientLimits(cfg ServerConfig) *clientLimits {
 	return &clientLimits{
 		maxSessions: cfg.MaxSessionsPerClient,
+		maxPerNet:   cfg.MaxSessionsPerNetwork,
 		maxPerMin:   cfg.MaxNewSessionsPerClient,
 		trusted:     cfg.TrustedProxies,
 		clients:     make(map[netip.Prefix]*clientState),
@@ -75,7 +78,8 @@ func (l *clientLimits) clientKey(a netip.Addr) (netip.Prefix, bool) {
 type clientSlot struct {
 	l      *clientLimits
 	st     *clientState
-	window time.Time // the window the session was counted in
+	net    *clientState // the client's IPv6 /48, or nil if not counted
+	window time.Time    // the window the session was counted in
 	once   sync.Once
 }
 
@@ -87,6 +91,9 @@ func (s *clientSlot) release() {
 	s.once.Do(func() {
 		s.l.mu.Lock()
 		s.st.sessions--
+		if s.net != nil {
+			s.net.sessions--
+		}
 		s.l.mu.Unlock()
 	})
 }
@@ -101,6 +108,9 @@ func (s *clientSlot) cancel() {
 	s.once.Do(func() {
 		s.l.mu.Lock()
 		s.st.sessions--
+		if s.net != nil {
+			s.net.sessions--
+		}
 		if s.st.windowStart.Equal(s.window) {
 			s.st.opened--
 		}
@@ -114,19 +124,20 @@ func (s *clientSlot) cancel() {
 // means the client is not counted.
 func (l *clientLimits) acquire(client netip.Addr, now time.Time) (slot *clientSlot, report bool, err error) {
 	key, ok := l.clientKey(client)
-	if !ok || (l.maxSessions <= 0 && l.maxPerMin <= 0) {
+	if !ok || (l.maxSessions <= 0 && l.maxPerMin <= 0 && l.maxPerNet <= 0) {
 		return nil, false, nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.pruneLocked(now)
-	st := l.clients[key]
+	st := l.stateLocked(key, now)
 	if st == nil {
-		if len(l.clients) >= maxTrackedClients {
-			return nil, false, nil
-		}
-		st = &clientState{windowStart: now}
-		l.clients[key] = st
+		return nil, false, nil
+	}
+	var net *clientState
+	if l.maxPerNet > 0 && client.Is6() {
+		p, _ := client.Prefix(48)
+		net = l.stateLocked(p, now)
 	}
 	if now.Sub(st.windowStart) >= limitWindow {
 		st.windowStart, st.opened, st.refusalSeen = now, 0, false
@@ -142,9 +153,25 @@ func (l *clientLimits) acquire(client netip.Addr, now time.Time) (slot *clientSl
 	if l.maxPerMin > 0 && st.opened >= l.maxPerMin {
 		return refuse(errClientRate)
 	}
+	if net != nil && net.sessions >= l.maxPerNet {
+		return refuse(errNetSessions)
+	}
 	st.sessions++
 	st.opened++
-	return &clientSlot{l: l, st: st, window: st.windowStart}, false, nil
+	if net != nil {
+		net.sessions++
+	}
+	return &clientSlot{l: l, st: st, net: net, window: st.windowStart}, false, nil
+}
+
+// stateLocked returns the counts for key, or nil if the table is full.
+func (l *clientLimits) stateLocked(key netip.Prefix, now time.Time) *clientState {
+	st := l.clients[key]
+	if st == nil && len(l.clients) < maxTrackedClients {
+		st = &clientState{windowStart: now}
+		l.clients[key] = st
+	}
+	return st
 }
 
 // pruneLocked forgets clients with no sessions whose window has passed, so
