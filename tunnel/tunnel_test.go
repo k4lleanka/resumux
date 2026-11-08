@@ -482,7 +482,7 @@ func targetClosesFirst(t *testing.T, redundant bool) {
 // session, and its place under MaxSessions, once the target has hung up.
 func TestHalfOpenClientIsDropped(t *testing.T) {
 	target := listenTarget(t, func(c *net.TCPConn) { c.Close() })
-	h := startServer(t, ServerConfig{Target: target, HalfOpenTimeout: 300 * time.Millisecond})
+	h := startServer(t, ServerConfig{Target: target, ResumeTimeout: 200 * time.Millisecond, HalfOpenTimeout: 200 * time.Millisecond})
 
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+testToken)
@@ -594,6 +594,41 @@ func TestTailSurvivesOutageAfterServerFinishes(t *testing.T) {
 	h.blocked.Store(true)
 	h.listener.cutAll()
 	time.Sleep(7 * time.Second)
+	h.blocked.Store(false)
+
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// The half-open limit must not cut off the last data a target sent before
+// hanging up while the client is in an outage it can still resume from.
+func TestHalfOpenLimitWaitsForResume(t *testing.T) {
+	want := []byte("bye")
+	target := listenTarget(t, func(c *net.TCPConn) {
+		// Hang up only once the client is cut off.
+		time.Sleep(time.Second)
+		c.Write(want)
+		c.Close()
+	})
+	h := startServer(t, ServerConfig{Target: target, HalfOpenTimeout: time.Second})
+	addr := startClient(t, ClientConfig{ServerURLs: []string{h.url}})
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	time.Sleep(300 * time.Millisecond)
+	h.blocked.Store(true)
+	h.listener.cutAll()
+	time.Sleep(4 * time.Second)
 	h.blocked.Store(false)
 
 	c.SetDeadline(time.Now().Add(30 * time.Second))

@@ -53,10 +53,11 @@ type ServerConfig struct {
 	// RefuseRedundant turns down clients that ask for redundant sessions, which
 	// can double the traffic the server sends. They get plain sessions.
 	RefuseRedundant bool
-	// HalfOpenTimeout is how long a client may keep sending after the target
-	// has closed its side, before the session is ended. Without it a client
-	// that never closes would hold its session forever. Zero means one
-	// minute, negative means no limit.
+	// HalfOpenTimeout is how long, beyond ResumeTimeout, a client may keep a
+	// session open after the target has closed its side. Without it a client
+	// that never closes would hold its session forever. ResumeTimeout comes
+	// first so that a client in an outage still gets the last of the data.
+	// Zero means one minute, negative means no limit.
 	HalfOpenTimeout time.Duration
 
 	Path    wspath.Options
@@ -310,7 +311,11 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	started = true
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
 	go func() {
-		pipe(s, target, sv.cfg.HalfOpenTimeout)
+		halfOpen := sv.cfg.HalfOpenTimeout
+		if halfOpen > 0 {
+			halfOpen += sv.cfg.ResumeTimeout
+		}
+		pipe(s, target, halfOpen)
 		slot.release()
 		sv.mu.Lock()
 		delete(sv.sessions, id)

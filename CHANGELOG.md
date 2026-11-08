@@ -12,8 +12,9 @@ with a public client:
   has at most one such resend waiting.
 - A client that answered pings but never closed its side kept its session
   forever after the target hung up, so a few dozen addresses could fill
-  `-max-sessions`. The server now ends such a session after
-  `-half-open-timeout`, one minute by default.
+  `-max-sessions`. The server now ends such a session once the resume
+  timeout and then `-half-open-timeout` (one minute by default) have
+  passed, so a client in an outage still gets the last of the data.
 - A path accepted messages of up to 1 MiB, which the windows do not count
   while they arrive, so the memory bound in the docs was about four times
   too low. The protocol limit is now 64 KiB, and

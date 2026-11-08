@@ -165,7 +165,7 @@ func runServer(args []string) error {
 	perClient := fs.Int("max-sessions-per-client", 0, "sessions one client address may hold at once (0: no limit)")
 	newPerClient := fs.Int("max-new-sessions-per-client", 0, "sessions one client address may open per minute (0: no limit)")
 	refuseRedundant := fs.Bool("refuse-redundant", false, "give clients that ask for -redundant plain sessions instead")
-	halfOpen := fs.Duration("half-open-timeout", time.Minute, "how long a client may keep a session open after the target closed it (negative: no limit)")
+	halfOpen := fs.Duration("half-open-timeout", time.Minute, "how long, beyond -resume-timeout, a client may keep a session open after the target closed it (negative: no limit)")
 	ackDelay := fs.Duration("ack-delay", 10*time.Millisecond, "how long acknowledgements wait to be sent together; longer means fewer messages, not more latency")
 	copyAll := fs.Bool("copy-all", false, "in redundant sessions, copy each frame to every path instead of a second one")
 	var sendWindow, recvWindow size
