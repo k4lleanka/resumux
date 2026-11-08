@@ -57,7 +57,7 @@ Download a binary from the
 with a SHA-256 checksum and build provenance you can verify:
 
 ```sh
-gh attestation verify resumux-v0.1.0-linux-amd64 --repo k4lleanka/resumux
+gh attestation verify resumux-v0.2.0-linux-amd64 --repo k4lleanka/resumux
 ```
 
 Or build it with Go 1.24 or newer:

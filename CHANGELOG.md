@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-11-08)
 
 Security fixes, found in a review. Each needed only the token, which ships
 with a public client:
