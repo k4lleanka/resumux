@@ -28,6 +28,11 @@ const (
 
 const frameHeaderLen = 1 + 8
 
+// MaxFrameLen is the largest frame, header included, that the protocol
+// allows. Paths should refuse larger messages, since each path may hold one
+// partly received message the windows do not count.
+const MaxFrameLen = 64 << 10
+
 var errBadFrame = errors.New("session: malformed frame")
 
 type frame struct {

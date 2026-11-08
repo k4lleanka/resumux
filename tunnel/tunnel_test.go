@@ -478,6 +478,38 @@ func targetClosesFirst(t *testing.T, redundant bool) {
 	}
 }
 
+// A client that answers pings but never closes its side must not keep its
+// session, and its place under MaxSessions, once the target has hung up.
+func TestHalfOpenClientIsDropped(t *testing.T) {
+	target := listenTarget(t, func(c *net.TCPConn) { c.Close() })
+	h := startServer(t, ServerConfig{Target: target, HalfOpenTimeout: 300 * time.Millisecond})
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+testToken)
+	hdr.Set(headerVersion, protocolVersion)
+	c, _, err := websocket.DefaultDialer.Dial(h.url, hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	// Reading answers the server's pings, so the path stays alive.
+	go func() {
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for h.server.NumSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("half-open session was kept")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func startTLSServer(t testing.TB) (*httptest.Server, string) {
 	t.Helper()
 	sv, err := NewServer(ServerConfig{Token: testToken, Target: echoServer(t), Logger: quiet})

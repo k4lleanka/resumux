@@ -106,6 +106,22 @@ func TestTextMessageIsRejected(t *testing.T) {
 	}
 }
 
+// The windows do not count a message still being received, so the path
+// must refuse one larger than the protocol allows instead of buffering it.
+func TestOversizedMessageIsRejected(t *testing.T) {
+	p, peer := pair(t, Options{})
+	go func() {
+		peer.WriteMessage(websocket.BinaryMessage, make([]byte, 64<<10))
+		peer.WriteMessage(websocket.BinaryMessage, make([]byte, 64<<10+1))
+	}()
+	if b, err := p.ReadFrame(); err != nil || len(b) != 64<<10 {
+		t.Fatalf("64 KiB message: %d bytes, %v", len(b), err)
+	}
+	if _, err := p.ReadFrame(); err == nil {
+		t.Fatal("message over 64 KiB accepted")
+	}
+}
+
 // A path that is receiving frames must not be pinged: the ping would only
 // compete with the traffic, which costs latency in interactive use.
 func TestBusyPathIsNotPinged(t *testing.T) {

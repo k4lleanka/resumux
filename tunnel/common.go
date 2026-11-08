@@ -48,7 +48,10 @@ func equalSecret(a, b string) bool {
 // pipe copies between a session and a TCP connection until both directions
 // are finished, then closes both. It returns the error that cut the stream
 // from the session short, or nil if the peer closed it cleanly.
-func pipe(s *session.Session, c net.Conn) error {
+//
+// If halfOpen is positive, the peer must finish its direction within halfOpen
+// of c finishing, or the session is aborted with ErrHalfOpen.
+func pipe(s *session.Session, c net.Conn, halfOpen time.Duration) error {
 	go func() {
 		<-s.Done()
 		if s.Err() != nil {
@@ -59,14 +62,26 @@ func pipe(s *session.Session, c net.Conn) error {
 
 	var wg sync.WaitGroup
 	var recvErr error
+	recvDone := make(chan struct{})
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		io.Copy(s, c)
 		s.CloseWrite()
+		if halfOpen <= 0 {
+			return
+		}
+		t := time.NewTimer(halfOpen)
+		defer t.Stop()
+		select {
+		case <-recvDone:
+		case <-t.C:
+			s.Abort(ErrHalfOpen)
+		}
 	}()
 	go func() {
 		defer wg.Done()
+		defer close(recvDone)
 		_, recvErr = io.Copy(c, s)
 		if recvErr != nil {
 			// The stream was cut short. Reset the connection so the

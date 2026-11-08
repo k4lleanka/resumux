@@ -203,7 +203,7 @@ func (cl *Client) Handle(ctx context.Context, local net.Conn) error {
 
 	// A stream that ended cleanly is not an error, even if a path redial then
 	// found the session already gone on the server.
-	if err := pipe(s, local); err != nil {
+	if err := pipe(s, local, 0); err != nil {
 		if serr := s.Err(); serr != nil {
 			return serr
 		}

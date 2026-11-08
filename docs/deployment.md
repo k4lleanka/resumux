@@ -108,8 +108,13 @@ When clients send little, as in a game, make the windows match the traffic:
 ```
 
 The same 40 sessions were then ended at 512 KiB each, and the server stayed
-under 50 MB. At worst a session now holds about 1.75 MB, so `-max-sessions`
-can be sized from the memory you have.
+under 50 MB.
+
+Each path adds to that: up to 64 KiB for a message still arriving, 64 KiB
+of queued copies in a redundant session, and the frame being written. With
+the windows above and the default `-max-paths 8`, a session holds about
+3 MB at worst, so 512 sessions could need 1.5 GB. Size `-max-sessions` from
+the memory you have, or lower `-max-paths` if your clients use fewer paths.
 
 The windows on the two sides must fit together, or a busy session is ended
 for sending too much:

@@ -37,7 +37,8 @@ type QuietPath interface {
 
 // Config tunes a Session. Zero values select the defaults.
 type Config struct {
-	// MaxFrameSize is the largest payload put in one frame.
+	// MaxFrameSize is the largest payload put in one frame, at most
+	// MaxFrameLen minus the 9-byte header.
 	MaxFrameSize int
 	// SendWindow is how much may be unacknowledged before Write blocks,
 	// counting each frame as its payload plus frameCost.
@@ -74,6 +75,7 @@ func (c Config) withDefaults() Config {
 	if c.MaxFrameSize <= 0 {
 		c.MaxFrameSize = 32 << 10
 	}
+	c.MaxFrameSize = min(c.MaxFrameSize, MaxFrameLen-frameHeaderLen)
 	if c.SendWindow <= 0 {
 		c.SendWindow = 4 << 20
 	}
@@ -119,6 +121,11 @@ const copyBudget = 64 << 10
 // the writer or holds more than the budget.
 const copyQueue = 64
 
+// followEvery is how often a follower may move to the path the peer sends
+// on. Each move sends everything unacknowledged again, so without a limit a
+// peer alternating paths could make the server send its window over and over.
+const followEvery = time.Second
+
 type sentFrame struct {
 	seq     uint64
 	kind    byte
@@ -143,6 +150,10 @@ type pathState struct {
 	// on it after that. It is set without wmu, so queued copies stop at once
 	// instead of each waiting out a stalled write.
 	draining atomic.Bool
+	// resyncWaiting is set while a retransmitting resync waits for wmu. It
+	// takes its snapshot once it has the path, so a second one would only
+	// send the same frames again.
+	resyncWaiting atomic.Bool
 }
 
 // Session is a reliable byte stream over a changing set of paths.
@@ -168,6 +179,8 @@ type Session struct {
 
 	paths  []*pathState
 	active *pathState
+	// followed is when a follower last moved to the peer's path.
+	followed time.Time
 
 	finRead bool // the peer's FIN has been returned by Read
 
@@ -527,28 +540,34 @@ func (s *Session) copyStale(c []byte) bool {
 // everything the peer has not acknowledged. Frames the peer already has are
 // dropped there by sequence number, so sending too much is harmless.
 func (s *Session) resync(ps *pathState, retransmit bool) {
-	s.mu.Lock()
-	ack := encodeFrame(frameAck, s.consumed, nil)
-	var frames [][]byte
-	if retransmit {
-		frames = make([][]byte, 0, len(s.unacked))
-		for _, f := range s.unacked {
-			frames = append(frames, encodeFrame(f.kind, f.seq, f.payload))
-		}
+	if retransmit && ps.resyncWaiting.Swap(true) {
+		return
 	}
-	s.mu.Unlock()
-
 	ps.wmu.Lock()
 	defer ps.wmu.Unlock()
+	if retransmit {
+		ps.resyncWaiting.Store(false)
+	}
 	if ps.draining.Load() {
 		return
 	}
+
+	s.mu.Lock()
+	ack := encodeFrame(frameAck, s.consumed, nil)
+	var frames []sentFrame
+	if retransmit {
+		// Payloads are never modified, so this shares them instead of
+		// holding a second copy of the window per path.
+		frames = append([]sentFrame(nil), s.unacked...)
+	}
+	s.mu.Unlock()
+
 	if err := ps.p.WriteFrame(ack); err != nil {
 		go s.pathFailed(ps)
 		return
 	}
 	for _, f := range frames {
-		if err := ps.p.WriteFrame(f); err != nil {
+		if err := ps.p.WriteFrame(encodeFrame(f.kind, f.seq, f.payload)); err != nil {
 			go s.pathFailed(ps)
 			return
 		}
@@ -612,8 +631,9 @@ func (s *Session) handle(ps *pathState, f frame) {
 	// Only one side may follow: if both did after picking different paths,
 	// each would chase the other forever, resending everything every time.
 	switched := false
-	if s.cfg.FollowPeer && s.active != ps && !f.copy {
+	if s.cfg.FollowPeer && s.active != ps && !f.copy && time.Since(s.followed) >= followEvery {
 		s.active = ps
+		s.followed = time.Now()
 		switched = true
 	}
 

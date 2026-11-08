@@ -53,6 +53,11 @@ type ServerConfig struct {
 	// RefuseRedundant turns down clients that ask for redundant sessions, which
 	// can double the traffic the server sends. They get plain sessions.
 	RefuseRedundant bool
+	// HalfOpenTimeout is how long a client may keep sending after the target
+	// has closed its side, before the session is ended. Without it a client
+	// that never closes would hold its session forever. Zero means one
+	// minute, negative means no limit.
+	HalfOpenTimeout time.Duration
 
 	Path    wspath.Options
 	Session session.Config
@@ -71,6 +76,9 @@ func (c ServerConfig) withDefaults() ServerConfig {
 	}
 	if c.DialTimeout <= 0 {
 		c.DialTimeout = 10 * time.Second
+	}
+	if c.HalfOpenTimeout == 0 {
+		c.HalfOpenTimeout = time.Minute
 	}
 	if c.Logger == nil {
 		c.Logger = log.Default()
@@ -111,6 +119,10 @@ type Server struct {
 // ErrSessionExpired is the reason a session closes after ResumeTimeout
 // without a path.
 var ErrSessionExpired = errors.New("tunnel: no path within resume timeout")
+
+// ErrHalfOpen is the reason a session ends when the client keeps it open for
+// longer than HalfOpenTimeout after the target closed.
+var ErrHalfOpen = errors.New("tunnel: client kept the session open after the target closed")
 
 // ErrServerClosed is the reason sessions end when the server is closed.
 var ErrServerClosed = errors.New("tunnel: server closed")
@@ -298,7 +310,7 @@ func (sv *Server) create(w http.ResponseWriter, r *http.Request) {
 	started = true
 	go expireWithoutPaths(s, sv.cfg.ResumeTimeout, ErrSessionExpired)
 	go func() {
-		pipe(s, target)
+		pipe(s, target, sv.cfg.HalfOpenTimeout)
 		slot.release()
 		sv.mu.Lock()
 		delete(sv.sessions, id)

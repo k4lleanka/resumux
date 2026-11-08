@@ -63,7 +63,9 @@ sessions for the resume timeout.
 ## Frames
 
 After the handshake, each binary WebSocket message carries exactly one frame.
-A text message, or a message larger than 1 MiB, closes the path it arrived on.
+A text message, or a message larger than 64 KiB, closes the path it arrived on,
+so a DATA payload is at most 65,527 bytes. The reference implementation sends
+at most 32 KiB.
 Integers are big-endian.
 
 ```

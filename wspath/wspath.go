@@ -21,7 +21,8 @@ type Options struct {
 	DeadAfter time.Duration
 	// WriteTimeout bounds a single write.
 	WriteTimeout time.Duration
-	// MaxFrameSize is the largest message accepted from the peer.
+	// MaxFrameSize is the largest message accepted from the peer. The
+	// default, 64 KiB, is the most the session protocol allows.
 	MaxFrameSize int64
 }
 
@@ -39,7 +40,7 @@ func (o Options) withDefaults() Options {
 		o.WriteTimeout = 10 * time.Second
 	}
 	if o.MaxFrameSize <= 0 {
-		o.MaxFrameSize = 1 << 20
+		o.MaxFrameSize = 64 << 10
 	}
 	return o
 }

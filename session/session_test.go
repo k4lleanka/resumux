@@ -372,6 +372,69 @@ func TestAckBeyondSentIsAborted(t *testing.T) {
 	waitAborted(t, s, ErrBadAck)
 }
 
+// countingPeer is like hostilePeer, but counts the bytes s writes to it.
+func countingPeer(t *testing.T, s *Session, n *atomic.Int64) *memPath {
+	t.Helper()
+	ours, theirs := memPair()
+	if err := s.AddPath(ours); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			b, err := theirs.ReadFrame()
+			if err != nil {
+				return
+			}
+			n.Add(int64(len(b)))
+		}
+	}()
+	return theirs
+}
+
+// A peer that keeps alternating paths must not make a follower send its
+// whole window again for every move, nor keep a copy of it per move.
+func TestAlternatingPeerIsNotAmplified(t *testing.T) {
+	s := New(Config{FollowPeer: true, SendWindow: 512 << 10})
+	defer s.Abort(nil)
+	var sent atomic.Int64
+	a := countingPeer(t, s, &sent)
+	b := countingPeer(t, s, &sent)
+
+	const unacked = 256 << 10
+	if _, err := s.Write(make([]byte, unacked)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	sent.Store(0)
+
+	ack := encodeFrame(frameAck, 0, nil)
+	for i := range 1000 {
+		p := a
+		if i%2 == 0 {
+			p = b
+		}
+		if err := p.WriteFrame(ack); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	// One move is allowed per followEvery, and each sends the window once.
+	if n := sent.Load(); n > 2*unacked {
+		t.Fatalf("%d KiB sent for 1000 moves, %d KiB unacknowledged", n>>10, unacked>>10)
+	}
+
+	// After followEvery the follower moves again, so a real failover still works.
+	time.Sleep(followEvery)
+	a.WriteFrame(ack)
+	time.Sleep(50 * time.Millisecond)
+	s.mu.Lock()
+	onA := s.active == s.paths[0]
+	s.mu.Unlock()
+	if !onA {
+		t.Fatal("follower did not move once followEvery had passed")
+	}
+}
+
 func FuzzDecodeFrame(f *testing.F) {
 	f.Add(encodeFrame(frameData, 7, []byte("hello")))
 	f.Add(encodeFrame(frameFin, 1, nil))

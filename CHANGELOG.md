@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+Security fixes, found in a review. Each needed only the token, which ships
+with a public client:
+
+- A client alternating paths made the server send its whole send window
+  again on every move, and keep a copy of it per move until the write
+  finished, so one session could exhaust the server's memory. The server
+  now follows the client to another path at most once a second, and a path
+  has at most one such resend waiting.
+- A client that answered pings but never closed its side kept its session
+  forever after the target hung up, so a few dozen addresses could fill
+  `-max-sessions`. The server now ends such a session after
+  `-half-open-timeout`, one minute by default.
+- A path accepted messages of up to 1 MiB, which the windows do not count
+  while they arrive, so the memory bound in the docs was about four times
+  too low. The protocol limit is now 64 KiB, and
+  [deployment](docs/deployment.md#memory-per-session) gives the corrected
+  bound.
+
 - `-ack-delay` on server and client sets how long acknowledgements wait to
   be sent together (10 ms by default). Acknowledgements only free the
   sender's buffer, so 100 ms costs no latency and cut resumux CPU by about
